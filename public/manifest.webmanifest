@@ -1,0 +1,18 @@
+{
+  "name": "Cloud Video Analyzer",
+  "short_name": "Video AI",
+  "description": "Browser-preprocessed industrial video analytics with Gemini, OpenAI, and NVIDIA Cosmos.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090a0a",
+  "theme_color": "#090a0a",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
