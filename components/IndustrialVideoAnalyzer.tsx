@@ -13,6 +13,11 @@ type ApiError = {
   detail?: string;
 };
 
+type ZoneCorner = "nw" | "ne" | "sw" | "se";
+type ZoneInteraction =
+  | { kind: "draw"; start: { x: number; y: number } }
+  | { kind: "resize"; corner: ZoneCorner; zone: Zone };
+
 const MAX_FRAMES = 5;
 const JPEG_QUALITY = 0.58;
 const DEMO_ANALYSIS_LIMIT = Number(process.env.NEXT_PUBLIC_DEMO_ANALYSIS_LIMIT ?? 20);
@@ -171,13 +176,14 @@ export function IndustrialVideoAnalyzer({
   providerStatus: Record<ProviderId, boolean>;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoFrameRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const liveSocketRef = useRef<WebSocket | null>(null);
   const liveTimerRef = useRef<number | null>(null);
   const previousFrameRef = useRef<EdgeMetricResult["snapshot"] | null>(null);
-  const drawStartRef = useRef<{ x: number; y: number } | null>(null);
+  const zoneInteractionRef = useRef<ZoneInteraction | null>(null);
 
   const [provider, setProvider] = useState<ProviderId>(providerStatus.gemini ? "gemini" : providerStatus.openai ? "openai" : "nvidia");
   const [mode, setMode] = useState<VideoMode>("person_zone");
@@ -611,8 +617,8 @@ export function IndustrialVideoAnalyzer({
     setObjective(preset.objective);
   }, []);
 
-  const pointerPosition = useCallback((event: PointerEvent<HTMLDivElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
+  const pointerPosition = useCallback((event: PointerEvent<HTMLElement>) => {
+    const rect = videoFrameRef.current?.getBoundingClientRect() ?? event.currentTarget.getBoundingClientRect();
     return {
       x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
       y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
@@ -621,22 +627,63 @@ export function IndustrialVideoAnalyzer({
 
   const startZoneDraw = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
-      drawStartRef.current = pointerPosition(event);
+      zoneInteractionRef.current = { kind: "draw", start: pointerPosition(event) };
       event.currentTarget.setPointerCapture(event.pointerId);
     },
     [pointerPosition],
   );
 
+  const startZoneResize = useCallback(
+    (zone: Zone, corner: ZoneCorner, event: PointerEvent<HTMLElement>) => {
+      event.stopPropagation();
+      zoneInteractionRef.current = { kind: "resize", corner, zone };
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [],
+  );
+
   const updateZoneDraw = useCallback(
-    (event: PointerEvent<HTMLDivElement>) => {
-      if (!drawStartRef.current) {
+    (event: PointerEvent<HTMLElement>) => {
+      const interaction = zoneInteractionRef.current;
+      if (!interaction) {
         return;
       }
       const current = pointerPosition(event);
-      const x = Math.min(drawStartRef.current.x, current.x);
-      const y = Math.min(drawStartRef.current.y, current.y);
-      const w = Math.abs(current.x - drawStartRef.current.x);
-      const h = Math.abs(current.y - drawStartRef.current.y);
+
+      let x1: number;
+      let y1: number;
+      let x2: number;
+      let y2: number;
+
+      if (interaction.kind === "draw") {
+        x1 = interaction.start.x;
+        y1 = interaction.start.y;
+        x2 = current.x;
+        y2 = current.y;
+      } else {
+        x1 = interaction.zone.x;
+        y1 = interaction.zone.y;
+        x2 = interaction.zone.x + interaction.zone.w;
+        y2 = interaction.zone.y + interaction.zone.h;
+
+        if (interaction.corner === "nw" || interaction.corner === "sw") {
+          x1 = current.x;
+        } else {
+          x2 = current.x;
+        }
+        if (interaction.corner === "nw" || interaction.corner === "ne") {
+          y1 = current.y;
+        } else {
+          y2 = current.y;
+        }
+      }
+
+      const x = Math.max(0, Math.min(x1, x2));
+      const y = Math.max(0, Math.min(y1, y2));
+      const right = Math.min(1, Math.max(x1, x2));
+      const bottom = Math.min(1, Math.max(y1, y2));
+      const w = right - x;
+      const h = bottom - y;
       if (w >= 0.02 && h >= 0.02) {
         setZones([{ id: "zone-1", label: "Restricted zone", x, y, w, h }]);
       }
@@ -644,9 +691,11 @@ export function IndustrialVideoAnalyzer({
     [pointerPosition],
   );
 
-  const endZoneDraw = useCallback((event: PointerEvent<HTMLDivElement>) => {
-    drawStartRef.current = null;
-    event.currentTarget.releasePointerCapture(event.pointerId);
+  const endZoneDraw = useCallback((event: PointerEvent<HTMLElement>) => {
+    zoneInteractionRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
   }, []);
 
   const remaining = Math.max(0, DEMO_ANALYSIS_LIMIT - analysesUsed);
@@ -662,7 +711,7 @@ export function IndustrialVideoAnalyzer({
         <div>
           <p className="eyebrow">Cloud video analytics API showcase</p>
           <h1>Describe any video analytics. Get structured alerts.</h1>
-          <p className="app-subtitle">Point your camera or upload a clip. The browser extracts keyframes, then Gemini/OpenAI return alerts, evidence, cost, and actions.</p>
+          <p className="app-subtitle">Point the camera, upload a clip, or run a sample. The browser samples keyframes, then Gemini/OpenAI return alerts, evidence, cost, and actions.</p>
         </div>
         <div className="loop">
           <span>video</span>
@@ -675,36 +724,12 @@ export function IndustrialVideoAnalyzer({
 
       <section className="industrial-grid">
         <div className="video-workbench panel">
-          <div className="workbench-toolbar">
-            <button className="primary-scan-button" disabled={running} onClick={startCamera} type="button">
-              <Camera size={16} /> Start camera
-            </button>
-            <button disabled={!running} onClick={stopCamera} type="button">
-              <Pause size={16} /> Stop
-            </button>
-            <label className="file-button">
-              <FileVideo size={16} /> Upload video
-              <input
-                accept="video/*"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) {
-                    void loadFile(file);
-                  }
-                }}
-                type="file"
-              />
-            </label>
-            <button className="toolbar-analyze" disabled={analyzing} onClick={analyze} type="button">
-              <Send size={16} /> {analyzing ? "Analyzing" : "Analyze"}
-            </button>
-          </div>
-
           <div
             className="industrial-video-frame"
             onPointerDown={startZoneDraw}
             onPointerMove={updateZoneDraw}
             onPointerUp={endZoneDraw}
+            ref={videoFrameRef}
             style={{ aspectRatio: videoAspectRatio }}
           >
             <video muted onLoadedMetadata={updateAspectRatio} playsInline ref={videoRef} />
@@ -720,6 +745,17 @@ export function IndustrialVideoAnalyzer({
                 }}
               >
                 {zone.label}
+                {(["nw", "ne", "sw", "se"] as ZoneCorner[]).map((corner) => (
+                  <button
+                    aria-label={`Resize ${zone.label} ${corner}`}
+                    className={`zone-handle ${corner}`}
+                    key={corner}
+                    onPointerDown={(event) => startZoneResize(zone, corner, event)}
+                    onPointerMove={updateZoneDraw}
+                    onPointerUp={endZoneDraw}
+                    type="button"
+                  />
+                ))}
               </div>
             ))}
             <div className="camera-status">{status}</div>
@@ -752,117 +788,103 @@ export function IndustrialVideoAnalyzer({
         </div>
 
         <aside className="analytics-control panel">
-          <div className="panel-heading">
-            <h2>Build analytics in plain English</h2>
+          <div className="mission-header">
+            <div>
+              <p className="eyebrow">Run an analysis</p>
+              <h2>Tell the system what to look for</h2>
+            </div>
             <span>{remaining} runs left</span>
           </div>
 
-          <div className="mobile-value-strip">
-            <span>1. Select clip</span>
-            <span>2. Type analytics</span>
-            <span>3. Get alerts</span>
-          </div>
-
-          <div className="demo-clip-grid" aria-label="Demo clips">
-            {SAMPLE_CLIPS.filter((clip) => clip.url).map((clip) => (
-              <button className={sampleUrl === clip.url ? "active" : ""} key={clip.url} onClick={() => void loadSampleClip(clip)} type="button">
-                <strong>{clip.label}</strong>
-                <small>{clip.note}</small>
+          <div className="mission-section">
+            <div className="section-title">
+              <span>1</span>
+              <strong>Choose input</strong>
+            </div>
+            <div className="input-choice-grid">
+              <button className={source === "camera" && running ? "active" : ""} disabled={running} onClick={startCamera} type="button">
+                <Camera size={16} />
+                <span>Live camera</span>
+                <small>Point at any scene</small>
               </button>
-            ))}
-          </div>
+              <button disabled={!running} onClick={stopCamera} type="button">
+                <Pause size={16} />
+                <span>Stop camera</span>
+                <small>Pause stream</small>
+              </button>
+              <label className={`upload-card ${source === "file" ? "active" : ""}`}>
+                <FileVideo size={16} />
+                <span>Upload video</span>
+                <small>Best for site footage</small>
+                <input
+                  accept="video/*"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) {
+                      void loadFile(file);
+                    }
+                  }}
+                  type="file"
+                />
+              </label>
+            </div>
 
-          <div className="source-picker">
-            <label className="file-button">
-              <FileVideo size={16} /> Upload site clip
-              <input
-                accept="video/*"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) {
-                    void loadFile(file);
-                  }
-                }}
-                type="file"
-              />
-            </label>
-            <select onChange={(event) => setSampleUrl(event.target.value)} value={sampleUrl}>
-              {SAMPLE_CLIPS.map((clip) => (
-                <option key={clip.label} value={clip.url}>
+            <div className="sample-strip" aria-label="Demo clips">
+              {SAMPLE_CLIPS.filter((clip) => clip.url).map((clip) => (
+                <button className={sampleUrl === clip.url && source === "sample" ? "active" : ""} key={clip.url} onClick={() => void loadSampleClip(clip)} type="button">
                   {clip.label}
-                </option>
+                </button>
               ))}
-            </select>
-            <input
-              onChange={(event) => setSampleUrl(event.target.value)}
-              placeholder="https://example.com/industrial-demo.mp4"
-              value={sampleUrl}
-            />
-            <button onClick={loadSampleUrl} type="button">
-              <Play size={16} /> Load sample URL
-            </button>
+            </div>
           </div>
 
-          <div className="provider-toggle" role="group" aria-label="Provider">
-            {(["gemini", "openai", "nvidia"] as ProviderId[]).map((candidate) => (
-              <button
-                className={provider === candidate ? "active" : ""}
-                key={candidate}
-                onClick={() => setProvider(candidate)}
-                type="button"
-              >
-                {PROVIDER_COPY[candidate].label}
-                <small>{PROVIDER_COPY[candidate].detail} / {providerStatus[candidate] ? "configured" : "missing key"}</small>
-              </button>
-            ))}
+          <div className="mission-section">
+            <div className="section-title">
+              <span>2</span>
+              <strong>Select analytic</strong>
+            </div>
+            <div className="preset-grid">
+              {OBJECTIVE_PRESETS.map((preset) => (
+                <button className={objective === preset.objective ? "active" : ""} key={preset.label} onClick={() => applyPreset(preset)} type="button">
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+
+            <label className="objective-box">
+              Plain-language instruction
+              <textarea onChange={(event) => setObjective(event.target.value)} value={objective} />
+            </label>
           </div>
 
-          <div className="preset-grid">
-            {OBJECTIVE_PRESETS.map((preset) => (
-              <button className={mode === preset.mode ? "active" : ""} key={preset.label} onClick={() => applyPreset(preset)} type="button">
-                {preset.label}
-              </button>
-            ))}
-          </div>
-
-          <label className="objective-box">
-            Plain-language analytics objective
-            <textarea onChange={(event) => setObjective(event.target.value)} value={objective} />
-          </label>
-
-          <div className="zone-row">
-            <Crosshair size={16} />
-            <span>
-              Zone: {zones[0]?.label ?? "none"} ({zones[0] ? `${Math.round(zones[0].w * 100)}% x ${Math.round(zones[0].h * 100)}%` : "draw on video"})
-            </span>
+          <div className="mission-section compact">
+            <div className="section-title">
+              <span>3</span>
+              <strong>Choose model</strong>
+            </div>
+            <div className="provider-toggle" role="group" aria-label="Provider">
+              {(["gemini", "openai", "nvidia"] as ProviderId[]).map((candidate) => (
+                <button
+                  className={provider === candidate ? "active" : ""}
+                  key={candidate}
+                  onClick={() => setProvider(candidate)}
+                  type="button"
+                >
+                  {PROVIDER_COPY[candidate].label}
+                  <small>{providerStatus[candidate] ? "ready" : "missing key"}</small>
+                </button>
+              ))}
+            </div>
           </div>
 
           <button className="analyze-button" disabled={analyzing} onClick={analyze} type="button">
-            <Send size={17} /> {analyzing ? "Analyzing..." : "Analyze sampled video"}
+            <Send size={17} /> {analyzing ? "Analyzing..." : "Analyze video"}
           </button>
-          <div className="live-controls">
-            <button disabled={liveRunning} onClick={startGeminiLive} type="button">
-              <Radar size={16} /> Start Gemini Live preview
-            </button>
-            <button disabled={!liveRunning} onClick={stopGeminiLive} type="button">
-              <Pause size={16} /> Stop Live
-            </button>
-          </div>
-          <div className="live-status">
-            <strong>{liveStatus}</strong>
-            <span>Preview streams JPEG frames through a short-lived Gemini Live token. Structured alerts still use Analyze.</span>
-            {liveEvents.map((item) => (
-              <small key={item}>{item}</small>
-            ))}
-          </div>
-          <div className="demo-usage">
-            <span>{sampledFrames.length ? `${sampledFrames.length} frames sampled` : "frames after analyze"}</span>
-            <span>{sampledFrames.length ? `${Math.round(payloadBytes(sampledFrames) / 1024)} KB payload` : "payload estimate"}</span>
-            <span>{analysis ? `${analysis.usage.inputTokens} in / ${analysis.usage.outputTokens} out` : "tokens after response"}</span>
-            <span>{analysis ? formatCost(analysis.usage.estimatedCostUsd) : "cost estimate"}</span>
-            <button className="usage-reset" onClick={resetLimit} type="button">
-              Reset limit
-            </button>
+
+          <div className="mini-status-row">
+            <span>{sampledFrames.length ? `${sampledFrames.length} frames` : "No cloud call yet"}</span>
+            <span>{analysis ? `${analysis.usage.latencyMs}ms` : status}</span>
+            <span>{analysis ? formatCost(analysis.usage.estimatedCostUsd) : "cost after run"}</span>
           </div>
 
           {devices.length > 0 ? (
@@ -878,9 +900,55 @@ export function IndustrialVideoAnalyzer({
             </label>
           ) : null}
 
-          <button onClick={reset} type="button">
-            <RotateCcw size={16} /> Clear result
-          </button>
+          <details className="advanced-panel">
+            <summary>Advanced options</summary>
+            <div className="advanced-grid">
+              <div className="zone-row">
+                <Crosshair size={16} />
+                <span>
+                  Zone: {zones[0]?.label ?? "none"} ({zones[0] ? `${Math.round(zones[0].w * 100)}% x ${Math.round(zones[0].h * 100)}%` : "draw on video"})
+                </span>
+              </div>
+
+              <div className="source-picker">
+                <select onChange={(event) => setSampleUrl(event.target.value)} value={sampleUrl}>
+                  {SAMPLE_CLIPS.map((clip) => (
+                    <option key={clip.label} value={clip.url}>
+                      {clip.label}
+                    </option>
+                  ))}
+                </select>
+                <input onChange={(event) => setSampleUrl(event.target.value)} placeholder="https://example.com/video.mp4" value={sampleUrl} />
+                <button onClick={loadSampleUrl} type="button">
+                  <Play size={16} /> Load URL
+                </button>
+              </div>
+
+              <div className="live-controls">
+                <button disabled={liveRunning} onClick={startGeminiLive} type="button">
+                  <Radar size={16} /> Gemini Live
+                </button>
+                <button disabled={!liveRunning} onClick={stopGeminiLive} type="button">
+                  <Pause size={16} /> Stop Live
+                </button>
+              </div>
+              <div className="live-status">
+                <strong>{liveStatus}</strong>
+                {liveEvents.map((item) => (
+                  <small key={item}>{item}</small>
+                ))}
+              </div>
+
+              <div className="utility-row">
+                <button className="usage-reset" onClick={resetLimit} type="button">
+                  Reset limit
+                </button>
+                <button onClick={reset} type="button">
+                  <RotateCcw size={16} /> Clear result
+                </button>
+              </div>
+            </div>
+          </details>
 
           {error ? (
             <div className="inline-error">
