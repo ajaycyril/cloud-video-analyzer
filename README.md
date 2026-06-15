@@ -50,6 +50,7 @@ Open `http://localhost:3000`. Camera access requires a secure context in product
 - The browser does not upload full video by default. It sends sampled JPEG frames and metadata.
 - Internet-hosted videos often block canvas access unless they provide CORS headers. Uploaded local clips are the reliable demo path.
 - The frontend includes PWA metadata and a standalone manifest for phone demos.
+- `public/samples/industrial-zone-person.jpg` is included for reproducible person/zone API tests.
 - API keys are only read server-side.
 - NVIDIA Cosmos integration targets the NIM/OpenAI-compatible endpoint and is isolated in one adapter for key-based validation.
 - There are no mock model fallbacks. Missing keys and model failures return explicit errors.

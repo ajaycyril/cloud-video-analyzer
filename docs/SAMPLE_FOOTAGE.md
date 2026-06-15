@@ -14,6 +14,7 @@ The app includes:
 
 - A CORS-safe browser sample clip for plumbing checks.
 - A public-domain factory sample link for person/zone style demos when browser CORS permits it.
+- A generated industrial test frame at `/samples/industrial-zone-person.jpg` for API-level person/zone validation.
 
 ## Internet Video Caveat
 

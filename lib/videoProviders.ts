@@ -148,7 +148,7 @@ export async function analyzeVideoWithOpenAI(request: VideoAnalysisRequest): Pro
 
   const model = configuredModel("openai");
   const startedAt = Date.now();
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+  const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       authorization: `Bearer ${apiKey}`,
@@ -156,34 +156,29 @@ export async function analyzeVideoWithOpenAI(request: VideoAnalysisRequest): Pro
     },
     body: JSON.stringify({
       model,
-      messages: [
-        {
-          role: "system",
-          content: VIDEO_ANALYTICS_SYSTEM_PROMPT,
-        },
+      instructions: VIDEO_ANALYTICS_SYSTEM_PROMPT,
+      input: [
         {
           role: "user",
           content: [
-            { type: "text", text: buildVideoAnalysisPrompt(request) },
+            { type: "input_text", text: buildVideoAnalysisPrompt(request) },
             ...request.frames.map((frame) => ({
-              type: "image_url",
-              image_url: {
-                url: frame.imageDataUrl,
-                detail: "low",
-              },
+              type: "input_image",
+              image_url: frame.imageDataUrl,
+              detail: "low",
             })),
           ],
         },
       ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
+      text: {
+        format: {
+          type: "json_schema",
           name: "video_analysis",
           strict: true,
           schema: videoAnalysisJsonSchema,
         },
       },
-      max_completion_tokens: 1800,
+      max_output_tokens: 1800,
     }),
   });
 
@@ -197,10 +192,15 @@ export async function analyzeVideoWithOpenAI(request: VideoAnalysisRequest): Pro
   }
 
   const typed = payload as {
-    choices?: Array<{ message?: { content?: string } }>;
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
+    output_text?: string;
+    output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
+    usage?: { input_tokens?: number; output_tokens?: number };
   };
-  const text = typed.choices?.[0]?.message?.content;
+  const text =
+    typed.output_text ??
+    typed.output
+      ?.flatMap((item) => item.content ?? [])
+      .find((content) => content.type === "output_text" || typeof content.text === "string")?.text;
   if (!text) {
     throw new Error("MODEL_RESPONSE_EMPTY");
   }
@@ -209,8 +209,8 @@ export async function analyzeVideoWithOpenAI(request: VideoAnalysisRequest): Pro
     "openai",
     model,
     parseModelJson(text),
-    typed.usage?.prompt_tokens ?? 0,
-    typed.usage?.completion_tokens ?? 0,
+    typed.usage?.input_tokens ?? 0,
+    typed.usage?.output_tokens ?? 0,
     Date.now() - startedAt,
   );
 }
