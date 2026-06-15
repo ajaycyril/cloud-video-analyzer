@@ -77,7 +77,7 @@ function withUsage(
       inputTokens,
       outputTokens,
       totalTokens,
-      estimatedCostUsd: estimateTokenCostUsd(provider, inputTokens, outputTokens),
+      estimatedCostUsd: estimateTokenCostUsd(provider, model, inputTokens, outputTokens),
       latencyMs,
     },
   };

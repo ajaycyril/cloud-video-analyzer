@@ -2,7 +2,7 @@
 
 import { AlertTriangle, Camera, Crosshair, FileVideo, Pause, Play, Radar, RotateCcw, Send, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
-import { buildVideoConstraints, listVideoInputDevices, stopStream } from "@/lib/camera";
+import { buildVideoConstraints, listVideoInputDevices, stopStream, type CameraFacing } from "@/lib/camera";
 import { canvasToJpegDataUrl, captureVideoFrame, computeEdgeMetrics, type EdgeMetricResult } from "@/lib/edgeMetrics";
 import { createObjectDetector, detectObjectsForVideo } from "@/lib/mediaPipeDetector";
 import type { LocalDetection } from "@/lib/types";
@@ -69,25 +69,25 @@ const SAMPLE_CLIPS: Array<{ label: string; url: string; note: string; mode: Vide
     objective: "Analyze the uploaded or linked video for visible activity, hazards, alerts, evidence, and recommended next actions.",
   },
   {
-    label: "Road activity",
+    label: "Factory people",
+    url: "/samples/factory-people.webm",
+    note: "People flow, zone monitoring, and operations supervision.",
+    mode: "person_zone",
+    objective: "Detect visible people movement near the marked restricted zone, trigger an alert only if a person appears inside the zone, and summarize operational flow.",
+  },
+  {
+    label: "Road safety",
     url: "/samples/road-traffic.webm",
     note: "Traffic, pedestrians, roadside risk, and supervisor actions.",
     mode: "safety",
     objective: "Analyze road activity, visible vehicles, pedestrian risk, lane or roadside hazards, and recommended supervisor actions.",
   },
   {
-    label: "General scene",
-    url: "/samples/flower-scene.mp4",
-    note: "Shows that the system can reject non-industrial hazards.",
-    mode: "safety",
-    objective: "Describe the scene, identify motion or safety relevance, and state whether this is an industrial hazard.",
-  },
-  {
-    label: "Negative control",
-    url: "/samples/big-buck-bunny.mp4",
-    note: "Validates that the model does not force industrial alerts.",
+    label: "Outdoor activity",
+    url: "/samples/outdoor-activity.mp4",
+    note: "General-purpose scene understanding outside a factory.",
     mode: "industrial_general",
-    objective: "Summarize visible activity and explain why this clip is not an industrial safety incident.",
+    objective: "Analyze the visible activity, identify people or objects that matter, flag layout or safety concerns only if visible, and recommend practical next actions.",
   },
 ];
 
@@ -192,14 +192,14 @@ export function IndustrialVideoAnalyzer({
   const [zones, setZones] = useState<Zone[]>([
     { id: "zone-1", label: "Restricted zone", x: 0.58, y: 0.2, w: 0.3, h: 0.58 },
   ]);
-  const [status, setStatus] = useState("ready");
+  const [status, setStatus] = useState("camera off - no recording");
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+  const [cameraFacing, setCameraFacing] = useState<CameraFacing>("environment");
   const [sampleUrl, setSampleUrl] = useState(SAMPLE_CLIPS[1].url);
-  const [sampledFrames, setSampledFrames] = useState<SampledFrame[]>([]);
   const [analysis, setAnalysis] = useState<VideoAnalysisResponse | null>(null);
   const [analysesUsed, setAnalysesUsed] = useState(initialAnalysesUsed);
   const [videoAspectRatio, setVideoAspectRatio] = useState("16 / 9");
@@ -242,15 +242,15 @@ export function IndustrialVideoAnalyzer({
     }
   }, []);
 
-  const startCamera = useCallback(async () => {
+  const startCamera = useCallback(async (nextFacing: CameraFacing = cameraFacing, deviceId: string | null = selectedDeviceId) => {
     setError(null);
-    setStatus("starting camera");
+    setCameraFacing(nextFacing);
+    setStatus(`requesting ${nextFacing === "environment" ? "back" : "front"} camera permission`);
     setSource("camera");
     try {
-      await createObjectDetector();
       clearVideoObjectUrl();
       stopStream(streamRef.current);
-      const stream = await navigator.mediaDevices.getUserMedia(buildVideoConstraints("webcam_coach", selectedDeviceId));
+      const stream = await navigator.mediaDevices.getUserMedia(buildVideoConstraints("webcam_coach", deviceId, nextFacing));
       streamRef.current = stream;
       if (!videoRef.current) {
         throw new Error("Video element is not ready.");
@@ -262,23 +262,35 @@ export function IndustrialVideoAnalyzer({
       await refreshDevices();
       previousFrameRef.current = null;
       setRunning(true);
-      setStatus("camera live, draw zone or analyze");
+      setStatus(`preview only - ${nextFacing === "environment" ? "back" : "front"} camera - no cloud upload`);
     } catch (startError) {
       setRunning(false);
-      setStatus("camera stopped");
+      setStatus("camera off - no recording");
       setError(readableError(startError));
     }
-  }, [clearVideoObjectUrl, refreshDevices, selectedDeviceId, updateAspectRatio]);
+  }, [cameraFacing, clearVideoObjectUrl, refreshDevices, selectedDeviceId, updateAspectRatio]);
 
   const stopCamera = useCallback(() => {
     setRunning(false);
-    setStatus("paused");
+    setStatus("camera off - no recording");
     stopStream(streamRef.current);
     streamRef.current = null;
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
   }, []);
+
+  const switchCamera = useCallback(async () => {
+    const nextFacing: CameraFacing = cameraFacing === "environment" ? "user" : "environment";
+    setSelectedDeviceId(null);
+    setStatus(`switching to ${nextFacing === "environment" ? "back" : "front"} camera`);
+    if (running) {
+      await startCamera(nextFacing, null);
+      return;
+    }
+    setCameraFacing(nextFacing);
+    setStatus(`camera off - ${nextFacing === "environment" ? "back" : "front"} camera selected`);
+  }, [cameraFacing, running, startCamera]);
 
   const loadFile = useCallback(
     async (file: File) => {
@@ -435,7 +447,6 @@ export function IndustrialVideoAnalyzer({
     if (frames.length === 0) {
       throw new Error("No frames could be sampled. If this is an internet video, CORS may block browser preprocessing. Upload the clip locally.");
     }
-    setSampledFrames(frames);
     setStatus(`sampled ${frames.length} keyframes`);
     return frames;
   }, [captureOneFrame, seekVideo, source]);
@@ -452,6 +463,7 @@ export function IndustrialVideoAnalyzer({
 
     setAnalyzing(true);
     setError(null);
+    setAnalysis(null);
     setStatus("extracting relevant frames in browser");
     try {
       const frames = await sampleFrames();
@@ -500,10 +512,9 @@ export function IndustrialVideoAnalyzer({
   const reset = useCallback(() => {
     setError(null);
     setAnalysis(null);
-    setSampledFrames([]);
-    setStatus("ready");
+    setStatus(running ? `preview only - ${cameraFacing === "environment" ? "back" : "front"} camera - no cloud upload` : "camera off - no recording");
     previousFrameRef.current = null;
-  }, []);
+  }, [cameraFacing, running]);
 
   const resetLimit = useCallback(() => {
     setAnalysesUsed(0);
@@ -701,9 +712,36 @@ export function IndustrialVideoAnalyzer({
   const remaining = Math.max(0, DEMO_ANALYSIS_LIMIT - analysesUsed);
   const triggeredAlerts = analysis?.alerts.filter((alert) => alert.triggered).length ?? 0;
   const primaryAlert = triggeredAlerts ? `${triggeredAlerts} alert${triggeredAlerts === 1 ? "" : "s"}` : analysis ? "clear" : "waiting";
-  const confidence = analysis ? `${Math.round(analysis.confidence)}%` : "--";
-  const frameCount = sampledFrames.length ? String(sampledFrames.length) : "--";
+  const cloudFrameCount = analysis ? String(analysis.edgeAssessment.framesAnalyzed) : analyzing && status.startsWith("sending") ? "sending" : "0";
   const estimatedCost = analysis ? formatCost(analysis.usage.estimatedCostUsd) : "--";
+  const isCloudSending = analyzing && status.startsWith("sending");
+  const cameraFacingLabel = cameraFacing === "environment" ? "Back camera" : "Front camera";
+  const cameraCaptureState = isCloudSending
+    ? "Sending sampled frames to cloud"
+    : analyzing
+      ? "Sampling locally - not uploaded yet"
+      : running
+        ? `Preview only - ${cameraFacingLabel} - no recording`
+        : source === "camera"
+          ? `Camera off - ${cameraFacingLabel} selected`
+          : source === "file"
+            ? "Local file loaded - no cloud call"
+            : "Sample clip loaded - no cloud call";
+  const cloudState = isCloudSending ? "Cloud analyzing" : analyzing ? "Local preprocessing" : analysis ? "Cloud response" : "Local only";
+  const cloudDetail = isCloudSending
+    ? "sampled frames in cloud"
+    : analyzing
+      ? "frames not sent yet"
+      : analysis
+        ? `${analysis.edgeAssessment.framesAnalyzed} frames analyzed`
+        : "no cloud call";
+  const videoHint = isCloudSending
+    ? "Cloud request running. Hold this view until the response returns."
+    : analyzing
+      ? "Local browser preprocessing. Frames are not in the cloud yet."
+      : analysis
+        ? "Cloud response received. Adjust the prompt or scene, then analyze again."
+        : "Local only. Video stays in your browser until you press Analyze.";
 
   return (
     <main className="industrial-shell">
@@ -711,7 +749,7 @@ export function IndustrialVideoAnalyzer({
         <div>
           <p className="eyebrow">Cloud video analytics API showcase</p>
           <h1>Describe any video analytics. Get structured alerts.</h1>
-          <p className="app-subtitle">Point the camera, upload a clip, or run a sample. The browser samples keyframes, then Gemini/OpenAI return alerts, evidence, cost, and actions.</p>
+          <p className="app-subtitle">Point the camera, upload a clip, or run a sample. The browser samples keyframes locally, then sends only selected JPEG frames to Gemini/OpenAI for alerts, evidence, cost, and actions.</p>
         </div>
         <div className="loop">
           <span>video</span>
@@ -758,32 +796,32 @@ export function IndustrialVideoAnalyzer({
                 ))}
               </div>
             ))}
-            <div className="camera-status">{status}</div>
-            <div className="video-hold-hint">{analyzing ? "Hold steady. Cloud model is reading sampled frames." : "Draw a zone, upload a clip, or point camera at the scene."}</div>
+            <div className="camera-status" title={status}>{cameraCaptureState}</div>
+            <div className={`video-hold-hint ${analyzing ? "active" : ""}`}>{videoHint}</div>
           </div>
           <canvas className="hidden-canvas" ref={canvasRef} />
 
           <div className="video-insights-row" aria-label="Current analysis status">
             <div>
+              <span>Cloud state</span>
+              <strong>{cloudState}</strong>
+            </div>
+            <div>
+              <span>Frames to cloud</span>
+              <strong>{cloudFrameCount}</strong>
+            </div>
+            <div>
               <span>Alert state</span>
               <strong>{primaryAlert}</strong>
             </div>
             <div>
-              <span>Confidence</span>
-              <strong>{confidence}</strong>
-            </div>
-            <div>
-              <span>Frames sent</span>
-              <strong>{frameCount}</strong>
-            </div>
-            <div>
-              <span>Cloud cost</span>
+              <span>Est. cost</span>
               <strong>{estimatedCost}</strong>
             </div>
           </div>
 
           <p className="panel-note">
-            Hold the camera on the scene until the response appears. Full video stays in the browser; only selected JPEG keyframes and edge signals are sent.
+            Hold the camera on the scene until the response appears. Full video stays in the browser; only selected JPEG keyframes and edge signals are sent. Cost is estimated from provider token usage.
           </p>
         </div>
 
@@ -802,10 +840,15 @@ export function IndustrialVideoAnalyzer({
               <strong>Choose input</strong>
             </div>
             <div className="input-choice-grid">
-              <button className={source === "camera" && running ? "active" : ""} disabled={running} onClick={startCamera} type="button">
+              <button className={source === "camera" && running ? "active" : ""} disabled={running} onClick={() => void startCamera()} type="button">
                 <Camera size={16} />
-                <span>Live camera</span>
-                <small>Point at any scene</small>
+                <span>{running ? "Camera on" : `Start ${cameraFacing === "environment" ? "back" : "front"} camera`}</span>
+                <small>Local preview only</small>
+              </button>
+              <button className={source === "camera" ? "active" : ""} onClick={() => void switchCamera()} type="button">
+                <RotateCcw size={16} />
+                <span>Flip camera</span>
+                <small>{cameraFacingLabel}</small>
               </button>
               <button disabled={!running} onClick={stopCamera} type="button">
                 <Pause size={16} />
@@ -827,6 +870,11 @@ export function IndustrialVideoAnalyzer({
                   type="file"
                 />
               </label>
+            </div>
+
+            <div className={`capture-disclosure ${isCloudSending ? "cloud" : analyzing ? "local" : ""}`}>
+              <strong>{cameraCaptureState}</strong>
+              <span>{isCloudSending ? "Only selected JPEG frames are in the cloud now." : "Live camera/video is not uploaded until Analyze video is pressed."}</span>
             </div>
 
             <div className="sample-strip" aria-label="Demo clips">
@@ -882,8 +930,8 @@ export function IndustrialVideoAnalyzer({
           </button>
 
           <div className="mini-status-row">
-            <span>{sampledFrames.length ? `${sampledFrames.length} frames` : "No cloud call yet"}</span>
-            <span>{analysis ? `${analysis.usage.latencyMs}ms` : status}</span>
+            <span>{cloudState}</span>
+            <span>{cloudDetail}</span>
             <span>{analysis ? formatCost(analysis.usage.estimatedCostUsd) : "cost after run"}</span>
           </div>
 

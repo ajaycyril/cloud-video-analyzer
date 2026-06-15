@@ -264,11 +264,12 @@ h3 {
 }
 
 .camera-status {
-  background: rgba(9, 10, 10, 0.76);
-  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(17, 131, 75, 0.24);
   border-radius: 999px;
   bottom: 12px;
-  color: var(--green);
+  box-shadow: 0 10px 28px rgba(16, 32, 25, 0.16);
+  color: #123321;
   font-family: var(--font-geist-mono), monospace;
   font-size: 12px;
   left: 12px;
@@ -871,15 +872,16 @@ h3 {
 }
 
 .drawn-zone {
-  background: rgba(255, 214, 102, 0.18);
+  background: rgba(255, 214, 102, 0.22);
   border: 2px solid var(--yellow);
   border-radius: 6px;
-  color: #ffe8a3;
+  color: #fff8d5;
   font-family: var(--font-geist-mono), monospace;
   font-size: 11px;
   left: 0;
   padding: 5px 7px;
   position: absolute;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.78);
   top: 0;
 }
 
@@ -921,11 +923,13 @@ h3 {
 }
 
 .video-hold-hint {
-  background: rgba(9, 10, 10, 0.74);
-  border: 1px solid rgba(124, 255, 155, 0.22);
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(17, 131, 75, 0.22);
   border-radius: 999px;
-  color: var(--text);
+  box-shadow: 0 10px 28px rgba(16, 32, 25, 0.16);
+  color: #123321;
   font-size: 12px;
+  font-weight: 650;
   max-width: min(560px, calc(100% - 24px));
   overflow: hidden;
   padding: 7px 10px;
@@ -936,6 +940,11 @@ h3 {
   white-space: nowrap;
 }
 
+.video-hold-hint.active {
+  border-color: rgba(17, 131, 75, 0.52);
+  color: var(--green);
+}
+
 .video-insights-row {
   display: grid;
   gap: 8px;
@@ -944,9 +953,10 @@ h3 {
 }
 
 .video-insights-row div {
-  background: var(--surface-2);
-  border: 1px solid rgba(124, 255, 155, 0.16);
+  background: #ffffff;
+  border: 1px solid rgba(17, 131, 75, 0.14);
   border-radius: var(--radius);
+  box-shadow: 0 10px 28px rgba(16, 32, 25, 0.08);
   min-width: 0;
   padding: 10px;
 }
@@ -1079,10 +1089,13 @@ h3 {
 }
 
 .analyze-button {
-  background: linear-gradient(135deg, rgba(124, 255, 155, 0.24), rgba(115, 215, 255, 0.14));
-  border-color: rgba(124, 255, 155, 0.55);
-  box-shadow: 0 14px 42px rgba(124, 255, 155, 0.1);
+  background: linear-gradient(135deg, #189d57, #0b5cff);
+  border-color: rgba(17, 131, 75, 0.42);
+  box-shadow: 0 14px 42px rgba(11, 92, 255, 0.14);
+  color: #ffffff;
+  font-size: 15px;
   font-weight: 800;
+  min-height: 52px;
   width: 100%;
 }
 
@@ -1149,20 +1162,21 @@ h3 {
 .input-choice-grid {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .input-choice-grid button,
 .upload-card {
   align-items: flex-start;
-  background: var(--surface-2);
+  background: #ffffff;
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  box-shadow: 0 10px 26px rgba(16, 32, 25, 0.06);
   color: var(--text);
   cursor: pointer;
   display: grid;
   gap: 5px;
-  min-height: 82px;
+  min-height: 74px;
   overflow: hidden;
   padding: 10px;
   position: relative;
@@ -1171,7 +1185,7 @@ h3 {
 
 .input-choice-grid button.active,
 .upload-card.active {
-  background: linear-gradient(135deg, rgba(124, 255, 155, 0.18), rgba(115, 215, 255, 0.08));
+  background: linear-gradient(135deg, rgba(24, 157, 87, 0.13), rgba(11, 92, 255, 0.07));
   border-color: rgba(124, 255, 155, 0.52);
 }
 
@@ -1192,6 +1206,37 @@ h3 {
   inset: 0;
   opacity: 0;
   position: absolute;
+}
+
+.capture-disclosure {
+  align-items: flex-start;
+  background: #f8fbf8;
+  border: 1px solid rgba(17, 131, 75, 0.16);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+}
+
+.capture-disclosure strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.capture-disclosure span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.capture-disclosure.local {
+  background: rgba(255, 214, 102, 0.12);
+  border-color: rgba(183, 121, 0, 0.28);
+}
+
+.capture-disclosure.cloud {
+  background: rgba(24, 157, 87, 0.1);
+  border-color: rgba(17, 131, 75, 0.34);
 }
 
 .sample-strip {
@@ -2048,13 +2093,13 @@ h3 {
 
   .input-choice-grid {
     gap: 6px;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .input-choice-grid button,
   .upload-card {
-    min-height: 60px;
-    padding: 7px 5px;
+    min-height: 62px;
+    padding: 8px;
   }
 
   .input-choice-grid button span,
@@ -2065,7 +2110,8 @@ h3 {
 
   .input-choice-grid button small,
   .upload-card small {
-    display: none;
+    display: block;
+    font-size: 10px;
   }
 
   .sample-strip {

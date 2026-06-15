@@ -5,7 +5,7 @@ type TokenPrice = {
   outputUsdPerMillion: number;
 };
 
-const PRICES: Record<ProviderId, TokenPrice> = {
+const DEFAULT_PRICES: Record<ProviderId, TokenPrice> = {
   gemini: {
     inputUsdPerMillion: 0.5,
     outputUsdPerMillion: 3,
@@ -20,7 +20,19 @@ const PRICES: Record<ProviderId, TokenPrice> = {
   },
 };
 
-export function estimateTokenCostUsd(provider: ProviderId, inputTokens: number, outputTokens: number): number {
-  const price = PRICES[provider];
+const OPENAI_MODEL_PRICES: Record<string, TokenPrice> = {
+  "gpt-4o-mini": {
+    inputUsdPerMillion: 0.15,
+    outputUsdPerMillion: 0.6,
+  },
+  "gpt-5.4-mini": {
+    inputUsdPerMillion: 0.75,
+    outputUsdPerMillion: 4.5,
+  },
+};
+
+export function estimateTokenCostUsd(provider: ProviderId, model: string, inputTokens: number, outputTokens: number): number {
+  const normalizedModel = model.trim().toLowerCase();
+  const price = provider === "openai" ? OPENAI_MODEL_PRICES[normalizedModel] ?? DEFAULT_PRICES.openai : DEFAULT_PRICES[provider];
   return (inputTokens / 1_000_000) * price.inputUsdPerMillion + (outputTokens / 1_000_000) * price.outputUsdPerMillion;
 }

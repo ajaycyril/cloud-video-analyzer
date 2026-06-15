@@ -17,7 +17,7 @@ The core idea: a customer writes the analytics they need in plain language, the 
 
 - Live camera: point a phone or laptop camera at a scene, choose a prompt, and analyze sampled frames.
 - Upload: upload site footage; the browser samples frames locally instead of sending the full video.
-- Built-in clips: road activity, general scene, and negative-control samples are bundled under `public/samples`.
+- Built-in clips: factory people, road safety, and outdoor activity samples are bundled under `public/samples`.
 - Drawn zones: drag a restricted zone on top of the video before running person/zone analytics.
 
 ## Architecture
@@ -59,7 +59,8 @@ Open `http://localhost:3000`. Camera access requires a secure context in product
 - The server caps cloud analysis to the best three sampled frames per request for latency and cost control.
 - Internet-hosted videos often block canvas access unless they provide CORS headers. Uploaded local clips are the reliable demo path.
 - The frontend includes PWA metadata and a standalone manifest for phone demos.
-- `public/samples` includes small reproducible demo media for road activity, general scene review, negative-control video, and person/zone API tests.
+- `public/samples` includes reproducible demo media for factory people flow, road safety review, outdoor activity analysis, and person/zone API tests.
+- Cloud cost is a model-aware estimate based on returned token usage and the local pricing table. Provider dashboards remain the billing source of truth.
 - API keys are only read server-side.
 - NVIDIA Cosmos integration targets the NIM/OpenAI-compatible endpoint and is isolated in one adapter for key-based validation.
 - There are no mock model fallbacks. Missing keys and model failures return explicit errors.
@@ -67,7 +68,7 @@ Open `http://localhost:3000`. Camera access requires a secure context in product
 ## Verified Production Flows
 
 - Chrome capability check: HTTPS, camera API, WebAssembly, canvas, and WebGPU capability detected.
-- Gemini Vision: uploaded road, factory/person, and negative-control clips.
-- OpenAI Vision: uploaded scene and person/zone clips through sampled image frames.
+- Gemini Vision: uploaded road, factory/person, and general activity clips.
+- OpenAI Vision: uploaded road, factory/person, and general activity clips through sampled image frames.
 - iPhone viewport: uploaded clips and built-in sample-card flow.
 - Camera path: verified with Chrome fake camera in production automation; physical phone camera access requires the user to grant browser permission.
