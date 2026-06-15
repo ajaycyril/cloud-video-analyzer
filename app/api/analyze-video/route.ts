@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { analyzeVideo } from "@/lib/videoProviders";
-import { videoAnalysisRequestSchema } from "@/lib/videoSchema";
+import { videoAnalysisRequestSchema, type SampledFrame } from "@/lib/videoSchema";
 
 export const runtime = "nodejs";
 
@@ -58,10 +58,50 @@ function publicModelError(message: string): string {
   if (message.includes("model_not_found") || message.includes("does not exist")) {
     return "Configured provider model is not available for this API key.";
   }
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV !== "production" || process.env.DEMO_EXPOSE_MODEL_ERRORS === "true") {
     return message;
   }
   return "Cloud model request failed. Try fewer frames or a clearer clip.";
+}
+
+function modelErrorCode(message: string): string {
+  if (message.endsWith("_MISSING")) {
+    return message;
+  }
+  if (message.includes("insufficient_quota")) {
+    return "PROVIDER_QUOTA";
+  }
+  if (message.includes("invalid_api_key")) {
+    return "PROVIDER_KEY_INVALID";
+  }
+  if (message.includes("model_not_found") || message.includes("does not exist")) {
+    return "PROVIDER_MODEL_UNAVAILABLE";
+  }
+  if (message.includes("MODEL_RESPONSE_SCHEMA_MISMATCH")) {
+    return "MODEL_RESPONSE_SCHEMA_MISMATCH";
+  }
+  if (message.includes("MODEL_RESPONSE_INVALID_JSON")) {
+    return "MODEL_RESPONSE_INVALID_JSON";
+  }
+  return "MODEL_REQUEST_FAILED";
+}
+
+function frameQualityScore(frame: SampledFrame): number {
+  return frame.edgeMetrics.sharpness + frame.edgeMetrics.visualComplexity + frame.edgeMetrics.brightness * 0.25 - frame.edgeMetrics.motionScore * 0.35;
+}
+
+function selectCloudFrames(frames: SampledFrame[]): SampledFrame[] {
+  const targetFrameCount = Math.min(frames.length, 3);
+  const usableFrames = frames.filter((frame) => frame.edgeMetrics.usable);
+  const candidateFrames = usableFrames.length ? usableFrames : frames;
+  const selected = new Set(
+    candidateFrames
+      .slice()
+      .sort((left, right) => frameQualityScore(right) - frameQualityScore(left))
+      .slice(0, targetFrameCount),
+  );
+
+  return frames.filter((frame) => selected.has(frame));
 }
 
 export async function POST(request: Request) {
@@ -85,19 +125,23 @@ export async function POST(request: Request) {
     return typedError("REQUEST_INVALID", parsed.error.issues.map((issue) => issue.message).join("; "), 400);
   }
 
-  const usableFrames = parsed.data.frames.filter((frame) => frame.edgeMetrics.usable);
-  if (usableFrames.length === 0) {
-    return typedError("NO_USABLE_FRAMES", "Hold steady and point at a clearer scene before cloud analysis.", 422);
-  }
+  const cloudFrames = selectCloudFrames(parsed.data.frames);
 
   try {
     const analysis = await analyzeVideo({
       ...parsed.data,
-      frames: usableFrames,
+      frames: cloudFrames,
     });
     return NextResponse.json(analysis);
   } catch (error) {
     const message = error instanceof Error ? error.message : "MODEL_REQUEST_FAILED";
+    console.warn("video analysis provider error", {
+      provider: parsed.data.provider,
+      mode: parsed.data.mode,
+      source: parsed.data.source,
+      frames: cloudFrames.length,
+      code: modelErrorCode(message),
+    });
     return typedError("MODEL_REQUEST_FAILED", publicModelError(message), 502);
   }
 }

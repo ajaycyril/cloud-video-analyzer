@@ -38,25 +38,59 @@ const OBJECTIVE_PRESETS: Array<{ label: string; mode: VideoMode; objective: stri
     mode: "operations",
     objective: "Summarize operational activity, detect queues or bottlenecks, and recommend what a supervisor or robot should do next.",
   },
+  {
+    label: "Queue/crowd",
+    mode: "operations",
+    objective: "Estimate crowding or queue buildup, identify where movement is blocked, and recommend whether a human supervisor or robot should intervene.",
+  },
+  {
+    label: "Asset watch",
+    mode: "industrial_general",
+    objective: "Identify important visible assets, note whether anything appears misplaced or obstructed, and recommend layout or routing improvements.",
+  },
+  {
+    label: "Custom audit",
+    mode: "industrial_general",
+    objective: "Analyze the scene using the user's custom instruction. Return alerts only when visible evidence supports them, and include uncertainty where needed.",
+  },
 ];
 
-const SAMPLE_CLIPS = [
+const SAMPLE_CLIPS: Array<{ label: string; url: string; note: string; mode: VideoMode; objective: string }> = [
   {
-    label: "Paste your public MP4 URL",
+    label: "Paste public MP4/WebM URL",
     url: "",
-    note: "Best for your demo clip. The server never receives full video, only sampled frames.",
+    note: "Use your own site footage when CORS allows frame extraction.",
+    mode: "industrial_general",
+    objective: "Analyze the uploaded or linked video for visible activity, hazards, alerts, evidence, and recommended next actions.",
   },
   {
-    label: "Factory people sample",
-    url: "https://commons.wikimedia.org/wiki/Special:Redirect/file/La%20Sortie%20de%20l%27Usine%20Lumi%C3%A8re%20%C3%A0%20Lyon%20I%201895.webm",
-    note: "Public-domain factory footage; useful for person/zone demo when CORS permits.",
+    label: "Road activity",
+    url: "/samples/road-traffic.webm",
+    note: "Traffic, pedestrians, roadside risk, and supervisor actions.",
+    mode: "safety",
+    objective: "Analyze road activity, visible vehicles, pedestrian risk, lane or roadside hazards, and recommended supervisor actions.",
   },
   {
-    label: "Browser test clip",
-    url: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
-    note: "CORS-safe browser sample for end-to-end plumbing; replace with industrial footage for the real demo.",
+    label: "General scene",
+    url: "/samples/flower-scene.mp4",
+    note: "Shows that the system can reject non-industrial hazards.",
+    mode: "safety",
+    objective: "Describe the scene, identify motion or safety relevance, and state whether this is an industrial hazard.",
+  },
+  {
+    label: "Negative control",
+    url: "/samples/big-buck-bunny.mp4",
+    note: "Validates that the model does not force industrial alerts.",
+    mode: "industrial_general",
+    objective: "Summarize visible activity and explain why this clip is not an industrial safety incident.",
   },
 ];
+
+const PROVIDER_COPY: Record<ProviderId, { label: string; detail: string }> = {
+  gemini: { label: "Gemini Vision", detail: "Live + structured" },
+  openai: { label: "OpenAI Vision", detail: "Responses frames" },
+  nvidia: { label: "NVIDIA Cosmos", detail: "Physical AI" },
+};
 
 function isApiError(value: unknown): value is ApiError {
   return Boolean(value && typeof value === "object" && ("error" in value || "detail" in value));
@@ -75,6 +109,40 @@ function formatCost(value: number): string {
 
 function payloadBytes(frames: SampledFrame[]): number {
   return frames.reduce((total, frame) => total + frame.imageDataUrl.length, 0);
+}
+
+function waitForVideoData(video: HTMLVideoElement): Promise<void> {
+  if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("Video is still loading. Wait a moment and analyze again."));
+    }, 6000);
+
+    function cleanup() {
+      window.clearTimeout(timeout);
+      video.removeEventListener("loadeddata", onReady);
+      video.removeEventListener("canplay", onReady);
+      video.removeEventListener("error", onError);
+    }
+
+    function onReady() {
+      cleanup();
+      resolve();
+    }
+
+    function onError() {
+      cleanup();
+      reject(new Error("Video could not be decoded by this browser."));
+    }
+
+    video.addEventListener("loadeddata", onReady, { once: true });
+    video.addEventListener("canplay", onReady, { once: true });
+    video.addEventListener("error", onError, { once: true });
+  });
 }
 
 function modeLabel(mode: VideoMode): string {
@@ -252,6 +320,30 @@ export function IndustrialVideoAnalyzer({
     setStatus("sample url loaded; press play or analyze");
   }, [clearVideoObjectUrl, sampleUrl]);
 
+  const loadSampleClip = useCallback(
+    async (clip: (typeof SAMPLE_CLIPS)[number]) => {
+      setSampleUrl(clip.url);
+      setMode(clip.mode);
+      setObjective(clip.objective);
+      setError(null);
+      stopStream(streamRef.current);
+      streamRef.current = null;
+      clearVideoObjectUrl();
+      setSource("sample");
+      if (videoRef.current) {
+        videoRef.current.crossOrigin = "anonymous";
+        videoRef.current.srcObject = null;
+        videoRef.current.src = clip.url;
+        videoRef.current.controls = true;
+        videoRef.current.muted = true;
+        videoRef.current.load();
+      }
+      setRunning(false);
+      setStatus(`${clip.label.toLowerCase()} sample ready`);
+    },
+    [clearVideoObjectUrl],
+  );
+
   const captureOneFrame = useCallback(async (timestampMs: number): Promise<SampledFrame | null> => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -308,6 +400,8 @@ export function IndustrialVideoAnalyzer({
     if (!video) {
       throw new Error("Video element is not ready.");
     }
+    setStatus("waiting for video frame");
+    await waitForVideoData(video);
     await createObjectDetector();
     previousFrameRef.current = null;
     const frames: SampledFrame[] = [];
@@ -556,6 +650,11 @@ export function IndustrialVideoAnalyzer({
   }, []);
 
   const remaining = Math.max(0, DEMO_ANALYSIS_LIMIT - analysesUsed);
+  const triggeredAlerts = analysis?.alerts.filter((alert) => alert.triggered).length ?? 0;
+  const primaryAlert = triggeredAlerts ? `${triggeredAlerts} alert${triggeredAlerts === 1 ? "" : "s"}` : analysis ? "clear" : "waiting";
+  const confidence = analysis ? `${Math.round(analysis.confidence)}%` : "--";
+  const frameCount = sampledFrames.length ? String(sampledFrames.length) : "--";
+  const estimatedCost = analysis ? formatCost(analysis.usage.estimatedCostUsd) : "--";
 
   return (
     <main className="industrial-shell">
@@ -563,13 +662,13 @@ export function IndustrialVideoAnalyzer({
         <div>
           <p className="eyebrow">Cloud video analytics API showcase</p>
           <h1>Describe any video analytics. Get structured alerts.</h1>
-          <p className="app-subtitle">Select/upload video. Type the analytics. Get alerts, evidence, timeline, cost, and actions.</p>
+          <p className="app-subtitle">Point your camera or upload a clip. The browser extracts keyframes, then Gemini/OpenAI return alerts, evidence, cost, and actions.</p>
         </div>
         <div className="loop">
           <span>video</span>
           <span>browser edge sampler</span>
           <span>plain-language objective</span>
-          <span>Gemini/OpenAI/Cosmos</span>
+          <span>Gemini/OpenAI Vision/Cosmos</span>
           <span>alert API</span>
         </div>
       </header>
@@ -596,6 +695,9 @@ export function IndustrialVideoAnalyzer({
                 type="file"
               />
             </label>
+            <button className="toolbar-analyze" disabled={analyzing} onClick={analyze} type="button">
+              <Send size={16} /> {analyzing ? "Analyzing" : "Analyze"}
+            </button>
           </div>
 
           <div
@@ -621,18 +723,37 @@ export function IndustrialVideoAnalyzer({
               </div>
             ))}
             <div className="camera-status">{status}</div>
+            <div className="video-hold-hint">{analyzing ? "Hold steady. Cloud model is reading sampled frames." : "Draw a zone, upload a clip, or point camera at the scene."}</div>
           </div>
           <canvas className="hidden-canvas" ref={canvasRef} />
 
+          <div className="video-insights-row" aria-label="Current analysis status">
+            <div>
+              <span>Alert state</span>
+              <strong>{primaryAlert}</strong>
+            </div>
+            <div>
+              <span>Confidence</span>
+              <strong>{confidence}</strong>
+            </div>
+            <div>
+              <span>Frames sent</span>
+              <strong>{frameCount}</strong>
+            </div>
+            <div>
+              <span>Cloud cost</span>
+              <strong>{estimatedCost}</strong>
+            </div>
+          </div>
+
           <p className="panel-note">
-            Draw a zone directly on the video. For production demos, upload your own clip or use a CORS-enabled MP4 URL so browser frame
-            extraction can run.
+            Hold the camera on the scene until the response appears. Full video stays in the browser; only selected JPEG keyframes and edge signals are sent.
           </p>
         </div>
 
         <aside className="analytics-control panel">
           <div className="panel-heading">
-            <h2>Analytics request</h2>
+            <h2>Build analytics in plain English</h2>
             <span>{remaining} runs left</span>
           </div>
 
@@ -640,6 +761,15 @@ export function IndustrialVideoAnalyzer({
             <span>1. Select clip</span>
             <span>2. Type analytics</span>
             <span>3. Get alerts</span>
+          </div>
+
+          <div className="demo-clip-grid" aria-label="Demo clips">
+            {SAMPLE_CLIPS.filter((clip) => clip.url).map((clip) => (
+              <button className={sampleUrl === clip.url ? "active" : ""} key={clip.url} onClick={() => void loadSampleClip(clip)} type="button">
+                <strong>{clip.label}</strong>
+                <small>{clip.note}</small>
+              </button>
+            ))}
           </div>
 
           <div className="source-picker">
@@ -681,8 +811,8 @@ export function IndustrialVideoAnalyzer({
                 onClick={() => setProvider(candidate)}
                 type="button"
               >
-                {candidate === "gemini" ? "Gemini" : candidate === "openai" ? "OpenAI" : "NVIDIA Cosmos"}
-                <small>{providerStatus[candidate] ? "configured" : "missing key"}</small>
+                {PROVIDER_COPY[candidate].label}
+                <small>{PROVIDER_COPY[candidate].detail} / {providerStatus[candidate] ? "configured" : "missing key"}</small>
               </button>
             ))}
           </div>

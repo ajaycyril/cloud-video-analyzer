@@ -38,15 +38,15 @@ function getGeminiClient(): GoogleGenAI {
 
 function configuredModel(provider: ProviderId): string {
   if (provider === "gemini") {
-    return process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+    return (process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL).trim();
   }
   if (provider === "openai") {
-    return process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL;
+    return (process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL).trim();
   }
   if (provider === "nvidia") {
-    return process.env.NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL;
+    return (process.env.NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL).trim();
   }
-  return process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+  return (process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL).trim();
 }
 
 function dataUrlToBase64(dataUrl: string): string {
@@ -58,6 +58,7 @@ function withUsage(
   provider: ProviderId,
   model: string,
   output: ModelOutput,
+  request: VideoAnalysisRequest,
   inputTokens: number,
   outputTokens: number,
   latencyMs: number,
@@ -67,6 +68,11 @@ function withUsage(
     ...output,
     provider,
     model,
+    edgeAssessment: {
+      ...output.edgeAssessment,
+      framesAnalyzed: request.frames.length,
+      cloudFramesSkipped: Math.max(0, request.sampling.maxFrames - request.frames.length),
+    },
     usage: {
       inputTokens,
       outputTokens,
@@ -89,7 +95,22 @@ function parseModelJson(text: string): ModelOutput {
   if (!result.success) {
     throw new Error("MODEL_RESPONSE_SCHEMA_MISMATCH");
   }
-  return result.data;
+  return {
+    ...result.data,
+    confidence: result.data.confidence <= 1 ? result.data.confidence * 100 : result.data.confidence,
+  };
+}
+
+function shouldRetryOpenAIError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return true;
+  }
+  return !(
+    error.message.includes("invalid_api_key") ||
+    error.message.includes("insufficient_quota") ||
+    error.message.includes("model_not_found") ||
+    error.message.includes("does not exist")
+  );
 }
 
 export async function analyzeVideoWithGemini(request: VideoAnalysisRequest): Promise<VideoAnalysisResponse> {
@@ -134,6 +155,7 @@ export async function analyzeVideoWithGemini(request: VideoAnalysisRequest): Pro
     "gemini",
     model,
     parseModelJson(response.text),
+    request,
     usage?.promptTokenCount ?? 0,
     usage?.candidatesTokenCount ?? 0,
     Date.now() - startedAt,
@@ -148,6 +170,24 @@ export async function analyzeVideoWithOpenAI(request: VideoAnalysisRequest): Pro
 
   const model = configuredModel("openai");
   const startedAt = Date.now();
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await requestOpenAIAnalysis(apiKey, model, request, startedAt);
+    } catch (error) {
+      lastError = error;
+      if (attempt === 1 || !shouldRetryOpenAIError(error)) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("OPENAI_REQUEST_FAILED");
+}
+
+async function requestOpenAIAnalysis(apiKey: string, model: string, request: VideoAnalysisRequest, startedAt: number): Promise<VideoAnalysisResponse> {
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -209,6 +249,7 @@ export async function analyzeVideoWithOpenAI(request: VideoAnalysisRequest): Pro
     "openai",
     model,
     parseModelJson(text),
+    request,
     typed.usage?.input_tokens ?? 0,
     typed.usage?.output_tokens ?? 0,
     Date.now() - startedAt,
@@ -277,6 +318,7 @@ export async function analyzeVideoWithNvidia(request: VideoAnalysisRequest): Pro
     "nvidia",
     model,
     parseModelJson(text),
+    request,
     typed.usage?.prompt_tokens ?? 0,
     typed.usage?.completion_tokens ?? 0,
     Date.now() - startedAt,

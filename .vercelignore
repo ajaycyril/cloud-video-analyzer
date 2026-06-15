@@ -1,0 +1,5 @@
+test-artifacts
+node_modules
+.next
+.git
+*.log

@@ -2,7 +2,7 @@
 
 Production-oriented browser and cloud demo for configurable industrial video analytics.
 
-The core idea: a customer writes the analytics they need in plain language, the browser extracts a small number of relevant frames plus edge signals, and Gemini or OpenAI returns structured alerts, evidence, risks, and recommended actions. This shows how general-purpose multimodal APIs can cover many video analytics workflows that previously required narrow custom models.
+The core idea: a customer writes the analytics they need in plain language, the browser extracts a small number of relevant frames plus edge signals, and Gemini or OpenAI Vision returns structured alerts, evidence, risks, and recommended actions. This shows how general-purpose multimodal APIs can cover many video analytics workflows that previously required narrow custom models.
 
 ## Use Cases
 
@@ -10,14 +10,22 @@ The core idea: a customer writes the analytics they need in plain language, the 
 - PPE visibility checks for hard hats, vests, gloves, and uncertainty reporting
 - Industrial safety hazard review
 - Operations monitoring and bottleneck summaries
+- Queue/crowd buildup and asset/layout review
 - Customer-defined analytics objectives without retraining
+
+## Demo Modes
+
+- Live camera: point a phone or laptop camera at a scene, choose a prompt, and analyze sampled frames.
+- Upload: upload site footage; the browser samples frames locally instead of sending the full video.
+- Built-in clips: road activity, general scene, and negative-control samples are bundled under `public/samples`.
+- Drawn zones: drag a restricted zone on top of the video before running person/zone analytics.
 
 ## Architecture
 
 1. Video source: live webcam, uploaded video, or CORS-enabled MP4 URL.
 2. Browser edge preprocessing: keyframe sampling, compression, quality checks, motion/complexity metrics, optional local object detection.
 3. Customer objective: plain-language analytics request plus optional drawn zones.
-4. Provider router: Gemini, OpenAI, or NVIDIA Cosmos server-side adapter.
+4. Provider router: Gemini, OpenAI Vision through the Responses API, or NVIDIA Cosmos server-side adapter.
 5. Structured response: alerts, evidence, timeline, risks, recommended human/automation/robot actions, usage, latency, and cost estimate.
 
 ## Environment
@@ -26,7 +34,7 @@ The core idea: a customer writes the analytics they need in plain language, the 
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-3-flash-preview
 OPENAI_API_KEY=
-OPENAI_MODEL=gpt-5.4-mini
+OPENAI_MODEL=gpt-4o-mini
 NVIDIA_API_KEY=
 NVIDIA_MODEL=nvidia/cosmos3-nano-reasoner
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
@@ -48,9 +56,18 @@ Open `http://localhost:3000`. Camera access requires a secure context in product
 ## Notes
 
 - The browser does not upload full video by default. It sends sampled JPEG frames and metadata.
+- The server caps cloud analysis to the best three sampled frames per request for latency and cost control.
 - Internet-hosted videos often block canvas access unless they provide CORS headers. Uploaded local clips are the reliable demo path.
 - The frontend includes PWA metadata and a standalone manifest for phone demos.
-- `public/samples/industrial-zone-person.jpg` is included for reproducible person/zone API tests.
+- `public/samples` includes small reproducible demo media for road activity, general scene review, negative-control video, and person/zone API tests.
 - API keys are only read server-side.
 - NVIDIA Cosmos integration targets the NIM/OpenAI-compatible endpoint and is isolated in one adapter for key-based validation.
 - There are no mock model fallbacks. Missing keys and model failures return explicit errors.
+
+## Verified Production Flows
+
+- Chrome capability check: HTTPS, camera API, WebAssembly, canvas, and WebGPU capability detected.
+- Gemini Vision: uploaded road, factory/person, and negative-control clips.
+- OpenAI Vision: uploaded scene and person/zone clips through sampled image frames.
+- iPhone viewport: uploaded clips and built-in sample-card flow.
+- Camera path: verified with Chrome fake camera in production automation; physical phone camera access requires the user to grant browser permission.

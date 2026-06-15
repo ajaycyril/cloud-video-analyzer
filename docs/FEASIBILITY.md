@@ -8,6 +8,7 @@ General-purpose multimodal APIs are increasingly viable for configurable video a
 - One provider contract supports zone alerts, PPE checks, safety review, and operations summaries.
 - Browser preprocessing reduces cloud payloads by sending a few useful frames instead of high-FPS video.
 - Structured outputs make the result usable as an API response, not just a chat answer.
+- Built-in sample clips and uploaded local videos avoid CORS problems from random public video URLs.
 
 ## Where Dedicated CV Still Wins
 
@@ -21,7 +22,7 @@ General-purpose multimodal APIs are increasingly viable for configurable video a
 ## Current Pricing Assumptions
 
 - Gemini 3 Flash Preview pricing is token-based for text/image/video input and output.
-- OpenAI vision inputs are billed as image/token input to the selected model.
+- OpenAI vision inputs are billed as image/token input to the selected model. This app uses sampled frames through the Responses API, not a native full-video analytics endpoint.
 - NVIDIA Build lists `cosmos3-nano-reasoner` as a free development endpoint; production terms and pricing should be confirmed in the NVIDIA account/API catalog before customer commitments.
 - The app estimates cost from returned token usage when available. NVIDIA is shown as zero estimated cost until account-specific pricing is configured.
 

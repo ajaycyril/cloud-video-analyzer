@@ -20,6 +20,12 @@ function browserNameFromUserAgent(userAgent: string): string {
   if (userAgent.includes("CriOS")) {
     return "Chrome on iOS";
   }
+  if (userAgent.includes("Edg/")) {
+    return "Microsoft Edge";
+  }
+  if (userAgent.includes("Chrome/") || userAgent.includes("Chromium/") || userAgent.includes("HeadlessChrome/")) {
+    return "Google Chrome";
+  }
   if (userAgent.includes("FxiOS")) {
     return "Firefox on iOS";
   }
@@ -42,6 +48,10 @@ function isChromeFamilyFromBrands(brands: Array<{ brand: string }> | undefined):
   return brands.some((brand) => brand.brand === "Google Chrome" || brand.brand === "Chromium" || brand.brand === "Microsoft Edge");
 }
 
+function isChromeFamilyFromUserAgent(userAgent: string): boolean {
+  return userAgent.includes("Chrome/") || userAgent.includes("Chromium/") || userAgent.includes("HeadlessChrome/") || userAgent.includes("Edg/");
+}
+
 export function getBrowserCapabilities(): CapabilityResult {
   if (typeof window === "undefined") {
     return {
@@ -60,7 +70,7 @@ export function getBrowserCapabilities(): CapabilityResult {
   const nav = navigator as Navigator & { userAgentData?: UserAgentDataLike; gpu?: unknown };
   const brands = nav.userAgentData?.brands;
   const browserName = brands ? browserNameFromBrands(brands) : browserNameFromUserAgent(navigator.userAgent);
-  const isChromeFamily = isChromeFamilyFromBrands(brands);
+  const isChromeFamily = brands ? isChromeFamilyFromBrands(brands) : isChromeFamilyFromUserAgent(navigator.userAgent);
   const hasMediaDevices = Boolean(nav.mediaDevices?.getUserMedia);
   const hasWebAssembly = typeof WebAssembly !== "undefined";
   const hasWebGPU = Boolean(nav.gpu);
