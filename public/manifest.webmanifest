@@ -1,18 +1,37 @@
 {
   "name": "Cloud Video Analyzer",
   "short_name": "Video AI",
-  "description": "Browser-preprocessed industrial video analytics with Gemini, OpenAI, and NVIDIA Cosmos.",
+  "description": "On-the-fly physical AI video analytics with browser frame sampling and cloud vision outcomes.",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
-  "background_color": "#090a0a",
-  "theme_color": "#090a0a",
+  "display_override": ["standalone", "minimal-ui", "browser"],
+  "background_color": "#f8fbf8",
+  "theme_color": "#f8fbf8",
   "orientation": "portrait",
+  "categories": ["productivity", "utilities", "business"],
   "icons": [
     {
       "src": "/icons/icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/screenshots/iphone-cloud-video-analyzer.png",
+      "sizes": "390x844",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "Mobile analytics workflow"
+    },
+    {
+      "src": "/screenshots/desktop-cloud-video-analyzer.png",
+      "sizes": "1440x1000",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Desktop analytics workflow"
     }
   ]
 }

@@ -4,11 +4,11 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Cloud Video Analyzer",
-  description: "Browser-preprocessed industrial video analytics powered by Gemini, OpenAI, and NVIDIA Cosmos.",
+  description: "On-the-fly physical AI video analytics: type what to detect, sample frames in the browser, and get structured Gemini/OpenAI outcomes.",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,
-    statusBarStyle: "black-translucent",
+    statusBarStyle: "default",
     title: "Video AI",
   },
   icons: {
@@ -18,7 +18,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#090a0a",
+  themeColor: "#f8fbf8",
   viewportFit: "cover",
   width: "device-width",
   initialScale: 1,

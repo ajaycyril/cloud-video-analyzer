@@ -193,6 +193,7 @@ export function IndustrialVideoAnalyzer({
   const [zones, setZones] = useState<Zone[]>([
     { id: "zone-1", label: "Restricted zone", x: 0.58, y: 0.2, w: 0.3, h: 0.58 },
   ]);
+  const [zoneToolOpen, setZoneToolOpen] = useState(false);
   const [status, setStatus] = useState("camera off - no recording");
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -642,10 +643,13 @@ export function IndustrialVideoAnalyzer({
 
   const startZoneDraw = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
+      if (!zoneToolOpen) {
+        return;
+      }
       zoneInteractionRef.current = { kind: "draw", start: pointerPosition(event) };
       event.currentTarget.setPointerCapture(event.pointerId);
     },
-    [pointerPosition],
+    [pointerPosition, zoneToolOpen],
   );
 
   const startZoneResize = useCallback(
@@ -721,7 +725,6 @@ export function IndustrialVideoAnalyzer({
   const isCloudSending = analyzing && status.startsWith("sending");
   const captureWindowSeconds = Math.round(CAMERA_CAPTURE_WINDOW_MS / 1000);
   const isLiveSource = source === "camera";
-  const sourceCaptureLabel = isLiveSource ? `Capture ${captureWindowSeconds}s` : "Sample full clip";
   const sourceCaptureDetail = isLiveSource
     ? `Live camera: capture a ${captureWindowSeconds}s local burst, sample up to ${MAX_FRAMES} frames, then send selected JPEGs.`
     : `Uploaded/demo video: sample up to ${MAX_FRAMES} keyframes across the full clip duration, then send selected JPEGs.`;
@@ -750,9 +753,8 @@ export function IndustrialVideoAnalyzer({
       : analysis
         ? "Cloud response received. Adjust the prompt or scene, then analyze again."
         : `Local only. ${sourceCaptureDetail}`;
-  const workflowStep = isCloudSending ? 3 : analyzing ? 2 : analysis ? 4 : 1;
-  const primaryRecommendation = analysis?.recommendations[0];
   const analyzeButtonText = analyzing ? (isCloudSending ? "Cloud analyzing..." : isLiveSource ? `Capturing ${captureWindowSeconds}s burst...` : "Sampling clip...") : analyzeLabel;
+  const quickPresets = OBJECTIVE_PRESETS.slice(0, 6);
 
   return (
     <main className="industrial-shell">
@@ -788,7 +790,7 @@ export function IndustrialVideoAnalyzer({
                 <span>{analysis.alerts.some((alert) => alert.triggered) ? "Alert annotation" : "No alert annotation"}</span>
               </div>
             ) : null}
-            {zones.map((zone) => (
+            {zoneToolOpen ? zones.map((zone) => (
               <div
                 className="drawn-zone"
                 key={zone.id}
@@ -812,7 +814,7 @@ export function IndustrialVideoAnalyzer({
                   />
                 ))}
               </div>
-            ))}
+            )) : null}
             <div className="camera-status" title={status}>{cameraCaptureState}</div>
             <div className={`video-hold-hint ${analyzing ? "active" : ""}`}>{videoHint}</div>
           </div>
@@ -821,10 +823,23 @@ export function IndustrialVideoAnalyzer({
           <div className="first-fold-console">
             <div className="first-fold-header">
               <div>
-                <span>Main workflow</span>
-                <strong>{sourceCaptureLabel} → send keyframes → get result</strong>
+                <span>On-the-fly video analytics</span>
+                <strong>Type what to detect, choose video, get outcomes</strong>
               </div>
               <small>{isLiveSource ? "Live camera burst" : "Full clip keyframe scan"}</small>
+            </div>
+
+            <label className="main-objective-box">
+              <span>What analytics do you want?</span>
+              <textarea onChange={(event) => setObjective(event.target.value)} placeholder="Example: detect if a person enters the marked area and recommend an action." value={objective} />
+            </label>
+
+            <div className="quick-preset-row" aria-label="Example analytics">
+              {quickPresets.map((preset) => (
+                <button className={objective === preset.objective ? "active" : ""} key={`quick-${preset.label}`} onClick={() => applyPreset(preset)} type="button">
+                  {preset.label}
+                </button>
+              ))}
             </div>
 
             <div className="first-fold-actions">
@@ -903,163 +918,103 @@ export function IndustrialVideoAnalyzer({
             </div>
           </div>
 
-          <div className={`primary-result-card ${analysis ? "ready" : ""}`}>
-            <div>
-              <span>Result appears here</span>
-              <strong>{analysis?.headline ?? `${sourceCaptureLabel} to analyze the scene`}</strong>
-            </div>
-            <p>
-              {analysis?.commentary ??
-                `${sourceCaptureDetail} The cloud returns structured alerts, evidence, and actions here.`}
-            </p>
-            <div className="primary-result-footer">
-              <span>{analysis ? `${analysis.edgeAssessment.framesAnalyzed} frames sent` : `0 frames sent`}</span>
-              <span>{analysis ? `${analysis.usage.latencyMs}ms` : "no cloud call yet"}</span>
-              <span>{analysis ? formatCost(analysis.usage.estimatedCostUsd) : "cost after run"}</span>
-            </div>
-            {primaryRecommendation ? (
-              <div className="primary-action">
-                <small>P{primaryRecommendation.priority} / {primaryRecommendation.owner}</small>
-                <strong>{primaryRecommendation.action}</strong>
-              </div>
-            ) : null}
-          </div>
-
           <p className="panel-note">
             Hold the camera on the scene until the response appears. Full video stays in the browser; only selected JPEG keyframes and edge signals are sent. Cost is estimated from provider token usage.
           </p>
         </div>
 
         <aside className="analytics-control panel">
-          <div className="mission-header">
-            <div>
-              <p className="eyebrow">Configuration</p>
-              <h2>Tell the system what to look for</h2>
-            </div>
-            <span>{remaining} runs left</span>
-          </div>
-
-          <div className="workflow-card" aria-label="Core workflow">
-            <div className={workflowStep === 1 ? "active" : ""}>
-              <span>1</span>
-              <strong>Preview</strong>
-              <small>Camera/video stays local</small>
-            </div>
-            <div className={workflowStep === 2 ? "active" : ""}>
-              <span>2</span>
-              <strong>{sourceCaptureLabel}</strong>
-              <small>{isLiveSource ? "Short local burst" : "Across duration"}</small>
-            </div>
-            <div className={workflowStep === 3 ? "active" : ""}>
-              <span>3</span>
-              <strong>Send frames</strong>
-              <small>Up to 3 JPEGs</small>
-            </div>
-            <div className={workflowStep === 4 ? "active" : ""}>
-              <span>4</span>
-              <strong>Results</strong>
-              <small>Alerts + actions</small>
-            </div>
-          </div>
-
-          <div className="mission-section">
-            <div className="section-title">
-              <span>1</span>
-              <strong>Select analytic</strong>
-            </div>
-            <div className="preset-grid">
-              {OBJECTIVE_PRESETS.map((preset) => (
-                <button className={objective === preset.objective ? "active" : ""} key={preset.label} onClick={() => applyPreset(preset)} type="button">
-                  {preset.label}
-                </button>
-              ))}
-            </div>
-
-            <label className="objective-box">
-              Plain-language instruction
-              <textarea onChange={(event) => setObjective(event.target.value)} value={objective} />
-            </label>
-          </div>
-
-          <div className="mission-section compact">
-            <div className="section-title">
-              <span>2</span>
-              <strong>Choose model</strong>
-            </div>
-            <div className="provider-toggle" role="group" aria-label="Provider">
-              {(["gemini", "openai", "nvidia"] as ProviderId[]).map((candidate) => (
-                <button
-                  className={provider === candidate ? "active" : ""}
-                  key={candidate}
-                  onClick={() => setProvider(candidate)}
-                  type="button"
-                >
-                  {PROVIDER_COPY[candidate].label}
-                  <small>{providerStatus[candidate] ? "ready" : "missing key"}</small>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {devices.length > 0 ? (
-            <label className="device-select">
-              Camera device
-              <select disabled={running} onChange={(event) => setSelectedDeviceId(event.target.value || null)} value={selectedDeviceId ?? ""}>
-                {devices.map((device, index) => (
-                  <option key={device.deviceId} value={device.deviceId}>
-                    {device.label || `Camera ${index + 1}`}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-
-          <details className="advanced-panel">
-            <summary>Advanced options</summary>
-            <div className="advanced-grid">
-              <div className="zone-row">
-                <Crosshair size={16} />
-                <span>
-                  Zone: {zones[0]?.label ?? "none"} ({zones[0] ? `${Math.round(zones[0].w * 100)}% x ${Math.round(zones[0].h * 100)}%` : "draw on video"})
-                </span>
+          <details className="optional-config-panel">
+            <summary>
+              <div>
+                <p className="eyebrow">Advanced settings</p>
+                <h2>Model, zones and live mode</h2>
               </div>
+              <span>{remaining} runs left</span>
+            </summary>
 
-              <div className="source-picker">
-                <select onChange={(event) => setSampleUrl(event.target.value)} value={sampleUrl}>
-                  {SAMPLE_CLIPS.map((clip) => (
-                    <option key={clip.label} value={clip.url}>
-                      {clip.label}
-                    </option>
+            <div className="optional-config-body">
+              <div className="mission-section compact">
+                <div className="section-title">
+                  <span>1</span>
+                  <strong>Choose model</strong>
+                </div>
+                <div className="provider-toggle" role="group" aria-label="Provider">
+                  {(["gemini", "openai", "nvidia"] as ProviderId[]).map((candidate) => (
+                    <button
+                      className={provider === candidate ? "active" : ""}
+                      key={candidate}
+                      onClick={() => setProvider(candidate)}
+                      type="button"
+                    >
+                      {PROVIDER_COPY[candidate].label}
+                      <small>{providerStatus[candidate] ? "ready" : "missing key"}</small>
+                    </button>
                   ))}
-                </select>
-                <input onChange={(event) => setSampleUrl(event.target.value)} placeholder="https://example.com/video.mp4" value={sampleUrl} />
-                <button onClick={loadSampleUrl} type="button">
-                  <Play size={16} /> Load URL
-                </button>
+                </div>
               </div>
 
-              <div className="live-controls">
-                <button disabled={liveRunning} onClick={startGeminiLive} type="button">
-                  <Radar size={16} /> Gemini Live
-                </button>
-                <button disabled={!liveRunning} onClick={stopGeminiLive} type="button">
-                  <Pause size={16} /> Stop Live
-                </button>
-              </div>
-              <div className="live-status">
-                <strong>{liveStatus}</strong>
-                {liveEvents.map((item) => (
-                  <small key={item}>{item}</small>
-                ))}
-              </div>
+              {devices.length > 0 ? (
+                <label className="device-select">
+                  Camera device
+                  <select disabled={running} onChange={(event) => setSelectedDeviceId(event.target.value || null)} value={selectedDeviceId ?? ""}>
+                    {devices.map((device, index) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.label || `Camera ${index + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
 
-              <div className="utility-row">
-                <button className="usage-reset" onClick={resetLimit} type="button">
-                  Reset limit
-                </button>
-                <button onClick={reset} type="button">
-                  <RotateCcw size={16} /> Clear result
-                </button>
+              <div className="advanced-grid">
+                <div className="zone-row">
+                  <Crosshair size={16} />
+                  <span>
+                    Zone tool: {zoneToolOpen ? `on (${Math.round((zones[0]?.w ?? 0) * 100)}% x ${Math.round((zones[0]?.h ?? 0) * 100)}%)` : "off"}
+                  </span>
+                  <button onClick={() => setZoneToolOpen((value) => !value)} type="button">
+                    {zoneToolOpen ? "Hide zone" : "Draw zone"}
+                  </button>
+                </div>
+
+                <div className="source-picker">
+                  <select onChange={(event) => setSampleUrl(event.target.value)} value={sampleUrl}>
+                    {SAMPLE_CLIPS.map((clip) => (
+                      <option key={clip.label} value={clip.url}>
+                        {clip.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input onChange={(event) => setSampleUrl(event.target.value)} placeholder="https://example.com/video.mp4" value={sampleUrl} />
+                  <button onClick={loadSampleUrl} type="button">
+                    <Play size={16} /> Load URL
+                  </button>
+                </div>
+
+                <div className="live-controls">
+                  <button disabled={liveRunning} onClick={startGeminiLive} type="button">
+                    <Radar size={16} /> Gemini Live
+                  </button>
+                  <button disabled={!liveRunning} onClick={stopGeminiLive} type="button">
+                    <Pause size={16} /> Stop Live
+                  </button>
+                </div>
+                <div className="live-status">
+                  <strong>{liveStatus}</strong>
+                  {liveEvents.map((item) => (
+                    <small key={item}>{item}</small>
+                  ))}
+                </div>
+
+                <div className="utility-row">
+                  <button className="usage-reset" onClick={resetLimit} type="button">
+                    Reset limit
+                  </button>
+                  <button onClick={reset} type="button">
+                    <RotateCcw size={16} /> Clear result
+                  </button>
+                </div>
               </div>
             </div>
           </details>

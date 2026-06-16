@@ -82,6 +82,8 @@ Structured video analytics response
 - Next.js App Router
 - React
 - TypeScript
+- Tailwind CSS v4 foundation with custom production CSS
+- PWA manifest, install metadata, app icons, and mobile viewport tuning
 - Gemini API via `@google/genai`
 - OpenAI-compatible Responses API flow for vision frames
 - MediaPipe Tasks Vision for browser-side object detection hooks
