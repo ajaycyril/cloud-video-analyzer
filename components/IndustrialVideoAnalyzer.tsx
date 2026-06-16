@@ -19,6 +19,7 @@ type ZoneInteraction =
   | { kind: "resize"; corner: ZoneCorner; zone: Zone };
 
 const MAX_FRAMES = 5;
+const CAMERA_CAPTURE_WINDOW_MS = 2000;
 const JPEG_QUALITY = 0.58;
 const DEMO_ANALYSIS_LIMIT = Number(process.env.NEXT_PUBLIC_DEMO_ANALYSIS_LIMIT ?? 20);
 
@@ -425,16 +426,19 @@ export function IndustrialVideoAnalyzer({
     const frames: SampledFrame[] = [];
 
     if (source === "camera" || !Number.isFinite(video.duration) || video.duration <= 0) {
+      const frameIntervalMs = CAMERA_CAPTURE_WINDOW_MS / MAX_FRAMES;
       for (let i = 0; i < MAX_FRAMES; i += 1) {
-        const frame = await captureOneFrame(i * 450);
+        setStatus(`capturing local ${Math.round(CAMERA_CAPTURE_WINDOW_MS / 1000)}s burst - frame ${i + 1} of ${MAX_FRAMES}`);
+        const frame = await captureOneFrame(i * frameIntervalMs);
         if (frame) {
           frames.push(frame);
         }
-        await new Promise((resolve) => window.setTimeout(resolve, 260));
+        await new Promise((resolve) => window.setTimeout(resolve, frameIntervalMs));
       }
     } else {
       const duration = Math.max(0.5, video.duration);
       for (let i = 0; i < MAX_FRAMES; i += 1) {
+        setStatus(`extracting keyframe ${i + 1} of ${MAX_FRAMES}`);
         const seconds = Math.min(duration - 0.05, (duration * (i + 1)) / (MAX_FRAMES + 1));
         await seekVideo(Math.max(0, seconds));
         const frame = await captureOneFrame(seconds * 1000);
@@ -715,11 +719,20 @@ export function IndustrialVideoAnalyzer({
   const cloudFrameCount = analysis ? String(analysis.edgeAssessment.framesAnalyzed) : analyzing && status.startsWith("sending") ? "sending" : "0";
   const estimatedCost = analysis ? formatCost(analysis.usage.estimatedCostUsd) : "--";
   const isCloudSending = analyzing && status.startsWith("sending");
+  const captureWindowSeconds = Math.round(CAMERA_CAPTURE_WINDOW_MS / 1000);
+  const isLiveSource = source === "camera";
+  const sourceCaptureLabel = isLiveSource ? `Capture ${captureWindowSeconds}s` : "Sample full clip";
+  const sourceCaptureDetail = isLiveSource
+    ? `Live camera: capture a ${captureWindowSeconds}s local burst, sample up to ${MAX_FRAMES} frames, then send selected JPEGs.`
+    : `Uploaded/demo video: sample up to ${MAX_FRAMES} keyframes across the full clip duration, then send selected JPEGs.`;
+  const analyzeLabel = isLiveSource ? `Capture ${captureWindowSeconds}s + Analyze` : "Sample clip + Analyze";
   const cameraFacingLabel = cameraFacing === "environment" ? "Back camera" : "Front camera";
   const cameraCaptureState = isCloudSending
     ? "Sending sampled frames to cloud"
     : analyzing
-      ? "Sampling locally - not uploaded yet"
+      ? isLiveSource
+        ? `Capturing local ${captureWindowSeconds}s burst - not uploaded yet`
+        : `Sampling full clip locally - not uploaded yet`
       : running
         ? `Preview only - ${cameraFacingLabel} - no recording`
         : source === "camera"
@@ -728,20 +741,18 @@ export function IndustrialVideoAnalyzer({
             ? "Local file loaded - no cloud call"
             : "Sample clip loaded - no cloud call";
   const cloudState = isCloudSending ? "Cloud analyzing" : analyzing ? "Local preprocessing" : analysis ? "Cloud response" : "Local only";
-  const cloudDetail = isCloudSending
-    ? "sampled frames in cloud"
-    : analyzing
-      ? "frames not sent yet"
-      : analysis
-        ? `${analysis.edgeAssessment.framesAnalyzed} frames analyzed`
-        : "no cloud call";
   const videoHint = isCloudSending
     ? "Cloud request running. Hold this view until the response returns."
     : analyzing
-      ? "Local browser preprocessing. Frames are not in the cloud yet."
+      ? isLiveSource
+        ? `Capturing a local ${captureWindowSeconds}s burst. Keep pointing at the scene.`
+        : `Sampling keyframes across the clip. Full video stays local.`
       : analysis
         ? "Cloud response received. Adjust the prompt or scene, then analyze again."
-        : "Local only. Video stays in your browser until you press Analyze.";
+        : `Local only. ${sourceCaptureDetail}`;
+  const workflowStep = isCloudSending ? 3 : analyzing ? 2 : analysis ? 4 : 1;
+  const primaryRecommendation = analysis?.recommendations[0];
+  const analyzeButtonText = analyzing ? (isCloudSending ? "Cloud analyzing..." : isLiveSource ? `Capturing ${captureWindowSeconds}s burst...` : "Sampling clip...") : analyzeLabel;
 
   return (
     <main className="industrial-shell">
@@ -771,6 +782,12 @@ export function IndustrialVideoAnalyzer({
             style={{ aspectRatio: videoAspectRatio }}
           >
             <video muted onLoadedMetadata={updateAspectRatio} playsInline ref={videoRef} />
+            {analysis ? (
+              <div className="analysis-annotation-overlay" aria-label="Rendered AI annotations">
+                <strong>{analysis.headline}</strong>
+                <span>{analysis.alerts.some((alert) => alert.triggered) ? "Alert annotation" : "No alert annotation"}</span>
+              </div>
+            ) : null}
             {zones.map((zone) => (
               <div
                 className="drawn-zone"
@@ -801,6 +818,72 @@ export function IndustrialVideoAnalyzer({
           </div>
           <canvas className="hidden-canvas" ref={canvasRef} />
 
+          <div className="first-fold-console">
+            <div className="first-fold-header">
+              <div>
+                <span>Main workflow</span>
+                <strong>{sourceCaptureLabel} → send keyframes → get result</strong>
+              </div>
+              <small>{isLiveSource ? "Live camera burst" : "Full clip keyframe scan"}</small>
+            </div>
+
+            <div className="first-fold-actions">
+              <button className={source === "camera" && running ? "active" : ""} disabled={running} onClick={() => void startCamera()} type="button">
+                <Camera size={16} />
+                <span>{running ? "Camera on" : `Start ${cameraFacing === "environment" ? "back" : "front"} camera`}</span>
+              </button>
+              <button className={source === "camera" ? "active" : ""} onClick={() => void switchCamera()} type="button">
+                <RotateCcw size={16} />
+                <span>Flip</span>
+              </button>
+              <label className={`upload-card compact ${source === "file" ? "active" : ""}`}>
+                <FileVideo size={16} />
+                <span>Upload</span>
+                <input
+                  accept="video/*"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) {
+                      void loadFile(file);
+                    }
+                  }}
+                  type="file"
+                />
+              </label>
+              <button disabled={!running} onClick={stopCamera} type="button">
+                <Pause size={16} />
+                <span>Stop</span>
+              </button>
+            </div>
+
+            <div className="sample-strip primary-samples" aria-label="Quick demo clips">
+              {SAMPLE_CLIPS.filter((clip) => clip.url).map((clip) => (
+                <button className={sampleUrl === clip.url && source === "sample" ? "active" : ""} key={`primary-${clip.url}`} onClick={() => void loadSampleClip(clip)} type="button">
+                  Use {clip.label}
+                </button>
+              ))}
+            </div>
+
+            <div className={`capture-disclosure ${isCloudSending ? "cloud" : analyzing ? "local" : ""}`}>
+              <strong>{cameraCaptureState}</strong>
+              <span>
+                {isCloudSending
+                  ? "Only selected JPEG keyframes are in the cloud now."
+                  : `${sourceCaptureDetail} Full video is not uploaded.`}
+              </span>
+            </div>
+
+            <button className="analyze-button first-fold-analyze" disabled={analyzing} onClick={analyze} type="button">
+              <Send size={17} /> {analyzeButtonText}
+            </button>
+
+            <div className={`inline-result-preview ${analysis ? "ready" : ""}`}>
+              <span>Result preview</span>
+              <strong>{analysis?.headline ?? "No result yet"}</strong>
+              <p>{analysis?.commentary ?? "Run the workflow and the first structured result appears here immediately."}</p>
+            </div>
+          </div>
+
           <div className="video-insights-row" aria-label="Current analysis status">
             <div>
               <span>Cloud state</span>
@@ -820,6 +903,28 @@ export function IndustrialVideoAnalyzer({
             </div>
           </div>
 
+          <div className={`primary-result-card ${analysis ? "ready" : ""}`}>
+            <div>
+              <span>Result appears here</span>
+              <strong>{analysis?.headline ?? `${sourceCaptureLabel} to analyze the scene`}</strong>
+            </div>
+            <p>
+              {analysis?.commentary ??
+                `${sourceCaptureDetail} The cloud returns structured alerts, evidence, and actions here.`}
+            </p>
+            <div className="primary-result-footer">
+              <span>{analysis ? `${analysis.edgeAssessment.framesAnalyzed} frames sent` : `0 frames sent`}</span>
+              <span>{analysis ? `${analysis.usage.latencyMs}ms` : "no cloud call yet"}</span>
+              <span>{analysis ? formatCost(analysis.usage.estimatedCostUsd) : "cost after run"}</span>
+            </div>
+            {primaryRecommendation ? (
+              <div className="primary-action">
+                <small>P{primaryRecommendation.priority} / {primaryRecommendation.owner}</small>
+                <strong>{primaryRecommendation.action}</strong>
+              </div>
+            ) : null}
+          </div>
+
           <p className="panel-note">
             Hold the camera on the scene until the response appears. Full video stays in the browser; only selected JPEG keyframes and edge signals are sent. Cost is estimated from provider token usage.
           </p>
@@ -828,67 +933,38 @@ export function IndustrialVideoAnalyzer({
         <aside className="analytics-control panel">
           <div className="mission-header">
             <div>
-              <p className="eyebrow">Run an analysis</p>
+              <p className="eyebrow">Configuration</p>
               <h2>Tell the system what to look for</h2>
             </div>
             <span>{remaining} runs left</span>
           </div>
 
-          <div className="mission-section">
-            <div className="section-title">
+          <div className="workflow-card" aria-label="Core workflow">
+            <div className={workflowStep === 1 ? "active" : ""}>
               <span>1</span>
-              <strong>Choose input</strong>
+              <strong>Preview</strong>
+              <small>Camera/video stays local</small>
             </div>
-            <div className="input-choice-grid">
-              <button className={source === "camera" && running ? "active" : ""} disabled={running} onClick={() => void startCamera()} type="button">
-                <Camera size={16} />
-                <span>{running ? "Camera on" : `Start ${cameraFacing === "environment" ? "back" : "front"} camera`}</span>
-                <small>Local preview only</small>
-              </button>
-              <button className={source === "camera" ? "active" : ""} onClick={() => void switchCamera()} type="button">
-                <RotateCcw size={16} />
-                <span>Flip camera</span>
-                <small>{cameraFacingLabel}</small>
-              </button>
-              <button disabled={!running} onClick={stopCamera} type="button">
-                <Pause size={16} />
-                <span>Stop camera</span>
-                <small>Pause stream</small>
-              </button>
-              <label className={`upload-card ${source === "file" ? "active" : ""}`}>
-                <FileVideo size={16} />
-                <span>Upload video</span>
-                <small>Best for site footage</small>
-                <input
-                  accept="video/*"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (file) {
-                      void loadFile(file);
-                    }
-                  }}
-                  type="file"
-                />
-              </label>
+            <div className={workflowStep === 2 ? "active" : ""}>
+              <span>2</span>
+              <strong>{sourceCaptureLabel}</strong>
+              <small>{isLiveSource ? "Short local burst" : "Across duration"}</small>
             </div>
-
-            <div className={`capture-disclosure ${isCloudSending ? "cloud" : analyzing ? "local" : ""}`}>
-              <strong>{cameraCaptureState}</strong>
-              <span>{isCloudSending ? "Only selected JPEG frames are in the cloud now." : "Live camera/video is not uploaded until Analyze video is pressed."}</span>
+            <div className={workflowStep === 3 ? "active" : ""}>
+              <span>3</span>
+              <strong>Send frames</strong>
+              <small>Up to 3 JPEGs</small>
             </div>
-
-            <div className="sample-strip" aria-label="Demo clips">
-              {SAMPLE_CLIPS.filter((clip) => clip.url).map((clip) => (
-                <button className={sampleUrl === clip.url && source === "sample" ? "active" : ""} key={clip.url} onClick={() => void loadSampleClip(clip)} type="button">
-                  {clip.label}
-                </button>
-              ))}
+            <div className={workflowStep === 4 ? "active" : ""}>
+              <span>4</span>
+              <strong>Results</strong>
+              <small>Alerts + actions</small>
             </div>
           </div>
 
           <div className="mission-section">
             <div className="section-title">
-              <span>2</span>
+              <span>1</span>
               <strong>Select analytic</strong>
             </div>
             <div className="preset-grid">
@@ -907,7 +983,7 @@ export function IndustrialVideoAnalyzer({
 
           <div className="mission-section compact">
             <div className="section-title">
-              <span>3</span>
+              <span>2</span>
               <strong>Choose model</strong>
             </div>
             <div className="provider-toggle" role="group" aria-label="Provider">
@@ -923,16 +999,6 @@ export function IndustrialVideoAnalyzer({
                 </button>
               ))}
             </div>
-          </div>
-
-          <button className="analyze-button" disabled={analyzing} onClick={analyze} type="button">
-            <Send size={17} /> {analyzing ? "Analyzing..." : "Analyze video"}
-          </button>
-
-          <div className="mini-status-row">
-            <span>{cloudState}</span>
-            <span>{cloudDetail}</span>
-            <span>{analysis ? formatCost(analysis.usage.estimatedCostUsd) : "cost after run"}</span>
           </div>
 
           {devices.length > 0 ? (

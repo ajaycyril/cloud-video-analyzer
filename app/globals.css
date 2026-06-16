@@ -871,6 +871,34 @@ h3 {
   width: 100%;
 }
 
+.analysis-annotation-overlay {
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(17, 131, 75, 0.28);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(16, 32, 25, 0.18);
+  display: grid;
+  gap: 4px;
+  left: 12px;
+  max-width: min(360px, calc(100% - 24px));
+  padding: 9px 10px;
+  position: absolute;
+  top: 12px;
+  z-index: 3;
+}
+
+.analysis-annotation-overlay strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.analysis-annotation-overlay span {
+  color: var(--green);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
 .drawn-zone {
   background: rgba(255, 214, 102, 0.22);
   border: 2px solid var(--yellow);
@@ -945,6 +973,126 @@ h3 {
   color: var(--green);
 }
 
+.first-fold-console {
+  background: linear-gradient(135deg, rgba(24, 157, 87, 0.08), rgba(11, 92, 255, 0.05));
+  border: 1px solid rgba(17, 131, 75, 0.16);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 9px;
+  margin-top: 10px;
+  padding: 10px;
+}
+
+.first-fold-header {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.first-fold-header span {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+  margin-bottom: 3px;
+  text-transform: uppercase;
+}
+
+.first-fold-header strong {
+  color: var(--text);
+  display: block;
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.first-fold-header small {
+  background: #ffffff;
+  border: 1px solid rgba(17, 131, 75, 0.16);
+  border-radius: 999px;
+  color: var(--muted);
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 6px 8px;
+}
+
+.first-fold-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1.2fr 0.68fr 0.68fr 0.58fr;
+}
+
+.first-fold-actions button,
+.upload-card.compact {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid rgba(17, 131, 75, 0.14);
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  min-height: 42px;
+  overflow: hidden;
+  padding: 0 10px;
+  position: relative;
+  text-align: center;
+}
+
+.first-fold-actions button.active,
+.upload-card.compact.active {
+  background: var(--green-soft);
+  border-color: rgba(17, 131, 75, 0.36);
+}
+
+.first-fold-actions span {
+  font-size: 12px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.primary-samples {
+  margin: 0;
+}
+
+.first-fold-analyze {
+  min-height: 56px;
+}
+
+.inline-result-preview {
+  background: #ffffff;
+  border: 1px solid rgba(17, 131, 75, 0.14);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+}
+
+.inline-result-preview.ready {
+  border-color: rgba(17, 131, 75, 0.34);
+}
+
+.inline-result-preview span {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.inline-result-preview strong {
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.inline-result-preview p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  margin: 0;
+}
+
 .video-insights-row {
   display: grid;
   gap: 8px;
@@ -976,6 +1124,84 @@ h3 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.primary-result-card {
+  background: #ffffff;
+  border: 1px solid rgba(17, 131, 75, 0.14);
+  border-radius: var(--radius);
+  box-shadow: 0 14px 34px rgba(16, 32, 25, 0.08);
+  display: grid;
+  gap: 9px;
+  margin-top: 10px;
+  padding: 12px;
+}
+
+.primary-result-card.ready {
+  border-color: rgba(17, 131, 75, 0.34);
+}
+
+.primary-result-card span {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+  margin-bottom: 3px;
+  text-transform: uppercase;
+}
+
+.primary-result-card strong {
+  color: var(--text);
+  display: block;
+  font-size: 17px;
+  line-height: 1.25;
+}
+
+.primary-result-card p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+  margin: 0;
+}
+
+.primary-result-footer {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.primary-result-footer span {
+  background: #f8fbf8;
+  border: 1px solid rgba(17, 131, 75, 0.12);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  margin: 0;
+  overflow: hidden;
+  padding: 6px 8px;
+  text-align: center;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.primary-action {
+  background: rgba(24, 157, 87, 0.08);
+  border: 1px solid rgba(17, 131, 75, 0.18);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+}
+
+.primary-action small {
+  color: var(--green);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.primary-action strong {
+  font-size: 14px;
 }
 
 .sample-url-row {
@@ -1120,6 +1346,58 @@ h3 {
   flex: 0 0 auto;
   font-size: 12px;
   padding: 6px 9px;
+}
+
+.workflow-card {
+  background: linear-gradient(135deg, rgba(24, 157, 87, 0.08), rgba(11, 92, 255, 0.06));
+  border: 1px solid rgba(17, 131, 75, 0.16);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 12px;
+  padding: 8px;
+}
+
+.workflow-card div {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px;
+}
+
+.workflow-card div.active {
+  background: #ffffff;
+  border-color: rgba(17, 131, 75, 0.34);
+  box-shadow: 0 10px 24px rgba(16, 32, 25, 0.08);
+}
+
+.workflow-card span {
+  align-items: center;
+  background: var(--green);
+  border-radius: 50%;
+  color: #ffffff;
+  display: inline-flex;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10px;
+  height: 18px;
+  justify-content: center;
+  width: 18px;
+}
+
+.workflow-card strong {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.15;
+}
+
+.workflow-card small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.2;
 }
 
 .mission-section {
@@ -1684,6 +1962,68 @@ h3 {
     top: auto;
   }
 
+  .first-fold-console {
+    gap: 7px;
+    margin-top: 7px;
+    padding: 8px;
+  }
+
+  .first-fold-header strong {
+    font-size: 13px;
+  }
+
+  .first-fold-header small {
+    display: none;
+  }
+
+  .first-fold-actions {
+    gap: 5px;
+    grid-template-columns: 1fr 0.58fr 0.58fr 0.52fr;
+  }
+
+  .first-fold-actions button,
+  .upload-card.compact {
+    gap: 5px;
+    min-height: 38px;
+    padding: 0 6px;
+  }
+
+  .first-fold-actions span {
+    font-size: 11px;
+  }
+
+  .first-fold-analyze {
+    min-height: 48px;
+  }
+
+  .inline-result-preview {
+    padding: 8px;
+  }
+
+  .inline-result-preview strong {
+    font-size: 13px;
+  }
+
+  .inline-result-preview p {
+    display: -webkit-box;
+    font-size: 11px;
+    line-clamp: 2;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .analysis-annotation-overlay {
+    left: 10px;
+    max-width: calc(100% - 20px);
+    padding: 7px 8px;
+    top: 10px;
+  }
+
+  .analysis-annotation-overlay strong {
+    font-size: 12px;
+  }
+
   .video-insights-row {
     gap: 5px;
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1702,6 +2042,29 @@ h3 {
 
   .video-insights-row strong {
     font-size: 12px;
+  }
+
+  .primary-result-card {
+    gap: 7px;
+    margin-top: 7px;
+    padding: 9px;
+  }
+
+  .primary-result-card strong {
+    font-size: 14px;
+  }
+
+  .primary-result-card p {
+    font-size: 12px;
+  }
+
+  .primary-result-footer {
+    gap: 4px;
+  }
+
+  .primary-result-footer span {
+    font-size: 10px;
+    padding: 5px 4px;
   }
 
   .objective-box textarea {
@@ -2075,6 +2438,25 @@ h3 {
   .mission-header span {
     font-size: 10px;
     padding: 5px 7px;
+  }
+
+  .workflow-card {
+    gap: 5px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-bottom: 8px;
+    padding: 6px;
+  }
+
+  .workflow-card div {
+    padding: 7px;
+  }
+
+  .workflow-card strong {
+    font-size: 11px;
+  }
+
+  .workflow-card small {
+    font-size: 9px;
   }
 
   .mission-section {

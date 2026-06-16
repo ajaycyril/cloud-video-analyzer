@@ -1,32 +1,92 @@
 # Cloud Video Analyzer
 
-Production-oriented browser and cloud demo for configurable industrial video analytics.
+Mobile-first physical AI and cloud video analytics demo.
 
-The core idea: a customer writes the analytics they need in plain language, the browser extracts a small number of relevant frames plus edge signals, and Gemini or OpenAI Vision returns structured alerts, evidence, risks, and recommended actions. This shows how general-purpose multimodal APIs can cover many video analytics workflows that previously required narrow custom models.
+Live demo: https://cloud-video-analyzer.vercel.app
 
-## Use Cases
+This project shows how general-purpose multimodal models can be used as a flexible video analytics layer. A user can point a phone camera at a scene, upload a clip, or select a demo video, describe the analytics they need in plain language, and receive structured alerts, timeline evidence, recommended actions, latency, and estimated cloud cost.
 
-- Person detection and restricted-zone alerts
-- PPE visibility checks for hard hats, vests, gloves, and uncertainty reporting
-- Industrial safety hazard review
-- Operations monitoring and bottleneck summaries
-- Queue/crowd buildup and asset/layout review
-- Customer-defined analytics objectives without retraining
+The core architecture is intentionally hybrid: the browser does the lightweight video preprocessing, then only selected JPEG keyframes and edge signals are sent to cloud vision APIs. The full video is not uploaded by default.
+
+## Screenshots
+
+### Mobile workflow
+
+![Mobile workflow](docs/assets/mobile-workflow.png)
+
+### Desktop workflow
+
+![Desktop workflow](docs/assets/desktop-workflow.png)
+
+### Structured analysis result
+
+![Analysis result](docs/assets/analysis-result.png)
+
+## What It Demonstrates
+
+- Physical AI workflow design for real-world camera input.
+- Browser edge preprocessing before cloud inference.
+- Plain-language configurable analytics instead of fixed rules.
+- Industrial-style use cases: person detection, restricted-zone alerts, PPE checks, safety hazards, operations review, queue/crowd monitoring, and asset/layout review.
+- Multimodal provider integration with Gemini and OpenAI Vision.
+- Structured output suitable for dashboards, alert APIs, robot tasking, and human review.
+- Production concerns: API-key isolation, request caps, frame sampling, payload limits, rate limiting, latency/cost display, and deployable PWA UI.
+
+## Core User Flow
+
+1. Preview a live camera feed, upload a clip, or select a built-in demo video.
+2. For live video, capture a short local burst in the browser.
+3. For uploaded or sample video, sample keyframes across the full clip duration.
+4. Send only selected JPEG keyframes and metadata to the configured cloud model.
+5. Render structured alerts, evidence, actions, and a browser-side annotation overlay.
 
 ## Demo Modes
 
-- Live camera: point a phone or laptop camera at a scene, choose a prompt, and analyze sampled frames.
-- Upload: upload site footage; the browser samples frames locally instead of sending the full video.
-- Built-in clips: factory people, road safety, and outdoor activity samples are bundled under `public/samples`.
-- Drawn zones: drag a restricted zone on top of the video before running person/zone analytics.
+- Live camera: phone or laptop camera preview, front/back camera toggle, short local capture window.
+- Uploaded clip: local browser keyframe sampling across the clip; full video is not uploaded.
+- Built-in clips: factory people flow, road safety, and outdoor activity samples.
+- Drawn zone: resize a restricted zone directly over the video for person/zone analytics.
+- Custom objective: write any analytics request in plain language.
 
 ## Architecture
 
-1. Video source: live webcam, uploaded video, or CORS-enabled MP4 URL.
-2. Browser edge preprocessing: keyframe sampling, compression, quality checks, motion/complexity metrics, optional local object detection.
-3. Customer objective: plain-language analytics request plus optional drawn zones.
-4. Provider router: Gemini, OpenAI Vision through the Responses API, or NVIDIA Cosmos server-side adapter.
-5. Structured response: alerts, evidence, timeline, risks, recommended human/automation/robot actions, usage, latency, and cost estimate.
+```text
+Camera / uploaded clip / sample video
+        |
+        v
+Browser preprocessing
+- capture window or full-clip keyframe sampling
+- JPEG compression
+- visual quality and motion metrics
+- optional local object detection
+        |
+        v
+Server-side provider router
+- request validation
+- payload and rate limits
+- key isolation
+- Gemini / OpenAI / optional NVIDIA-compatible adapter
+        |
+        v
+Structured video analytics response
+- scene summary
+- objects and evidence
+- alerts and severity
+- timeline observations
+- recommended human, automation, or robot actions
+- token usage, latency, estimated cost
+```
+
+## Tech Stack
+
+- Next.js App Router
+- React
+- TypeScript
+- Gemini API via `@google/genai`
+- OpenAI-compatible Responses API flow for vision frames
+- MediaPipe Tasks Vision for browser-side object detection hooks
+- Browser canvas keyframe extraction
+- Vercel production deployment
 
 ## Environment
 
@@ -51,24 +111,25 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`. Camera access requires a secure context in production; use the deployed HTTPS URL for phone demos.
+Open `http://localhost:3000`.
 
-## Notes
+Camera access requires a secure context in production, so phone demos should use the HTTPS Vercel URL.
 
-- The browser does not upload full video by default. It sends sampled JPEG frames and metadata.
-- The server caps cloud analysis to the best three sampled frames per request for latency and cost control.
-- Internet-hosted videos often block canvas access unless they provide CORS headers. Uploaded local clips are the reliable demo path.
-- The frontend includes PWA metadata and a standalone manifest for phone demos.
-- `public/samples` includes reproducible demo media for factory people flow, road safety review, outdoor activity analysis, and person/zone API tests.
-- Cloud cost is a model-aware estimate based on returned token usage and the local pricing table. Provider dashboards remain the billing source of truth.
-- API keys are only read server-side.
-- NVIDIA Cosmos integration targets the NIM/OpenAI-compatible endpoint and is isolated in one adapter for key-based validation.
-- There are no mock model fallbacks. Missing keys and model failures return explicit errors.
+## Production Notes
+
+- API keys are server-side only.
+- The browser does not upload full video by default.
+- The server caps cloud analysis to selected sampled frames for latency and cost control.
+- Internet-hosted videos may block canvas extraction unless CORS headers are present; uploaded files and bundled samples are reliable.
+- Cost is a model-aware estimate based on returned token usage and the local pricing table. Provider dashboards remain the billing source of truth.
+- There are no mock model fallbacks. Missing keys and provider failures return explicit errors.
 
 ## Verified Production Flows
 
-- Chrome capability check: HTTPS, camera API, WebAssembly, canvas, and WebGPU capability detected.
-- Gemini Vision: uploaded road, factory/person, and general activity clips.
-- OpenAI Vision: uploaded road, factory/person, and general activity clips through sampled image frames.
-- iPhone viewport: uploaded clips and built-in sample-card flow.
-- Camera path: verified with Chrome fake camera in production automation; physical phone camera access requires the user to grant browser permission.
+- Production deployment on Vercel.
+- iPhone viewport workflow.
+- Live camera path with fake-camera automation.
+- Built-in sample clip workflow.
+- Gemini Vision analysis on road/factory/general activity clips.
+- OpenAI Vision analysis on road/factory/general activity clips.
+- Browser-rendered result and annotation overlay.
