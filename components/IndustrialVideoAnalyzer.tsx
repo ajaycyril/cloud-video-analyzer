@@ -14,6 +14,7 @@ type ApiError = {
 };
 
 type ZoneCorner = "nw" | "ne" | "sw" | "se";
+type VideoOrientation = "landscape-video" | "portrait-video";
 type ZoneInteraction =
   | { kind: "draw"; start: { x: number; y: number } }
   | { kind: "resize"; corner: ZoneCorner; zone: Zone };
@@ -207,6 +208,7 @@ export function IndustrialVideoAnalyzer({
   const [sampleUrl, setSampleUrl] = useState(SAMPLE_CLIPS[1].url);
   const [analysis, setAnalysis] = useState<VideoAnalysisResponse | null>(null);
   const [analysesUsed, setAnalysesUsed] = useState(initialAnalysesUsed);
+  const [videoOrientation, setVideoOrientation] = useState<VideoOrientation>("landscape-video");
   const [liveStatus, setLiveStatus] = useState("Gemini Live idle");
   const [liveRunning, setLiveRunning] = useState(false);
   const [liveEvents, setLiveEvents] = useState<string[]>([]);
@@ -239,6 +241,14 @@ export function IndustrialVideoAnalyzer({
     }
   }, []);
 
+  const updateVideoOrientation = useCallback(() => {
+    const video = videoRef.current;
+    if (!video?.videoWidth || !video.videoHeight) {
+      return;
+    }
+    setVideoOrientation(video.videoHeight > video.videoWidth ? "portrait-video" : "landscape-video");
+  }, []);
+
   const startCamera = useCallback(async (nextFacing: CameraFacing = cameraFacing, deviceId: string | null = selectedDeviceId) => {
     setError(null);
     setCameraFacing(nextFacing);
@@ -255,6 +265,7 @@ export function IndustrialVideoAnalyzer({
       videoRef.current.srcObject = stream;
       videoRef.current.controls = false;
       await videoRef.current.play();
+      updateVideoOrientation();
       await refreshDevices();
       previousFrameRef.current = null;
       setRunning(true);
@@ -264,7 +275,7 @@ export function IndustrialVideoAnalyzer({
       setStatus("camera off - no recording");
       setError(readableError(startError));
     }
-  }, [cameraFacing, clearVideoObjectUrl, refreshDevices, selectedDeviceId]);
+  }, [cameraFacing, clearVideoObjectUrl, refreshDevices, selectedDeviceId, updateVideoOrientation]);
 
   const stopCamera = useCallback(() => {
     setRunning(false);
@@ -790,13 +801,13 @@ export function IndustrialVideoAnalyzer({
       <section className="industrial-grid">
         <div className="video-workbench panel">
           <div
-            className="industrial-video-frame"
+            className={`industrial-video-frame ${videoOrientation} ${source === "camera" ? "live-camera-frame" : "clip-video-frame"}`}
             onPointerDown={startZoneDraw}
             onPointerMove={updateZoneDraw}
             onPointerUp={endZoneDraw}
             ref={videoFrameRef}
           >
-            <video muted playsInline ref={videoRef} />
+            <video muted onLoadedMetadata={updateVideoOrientation} onResize={updateVideoOrientation} playsInline ref={videoRef} />
             {analysis ? (
               <div className="analysis-annotation-overlay" aria-label="Rendered AI annotations">
                 <strong>{analysis.headline}</strong>

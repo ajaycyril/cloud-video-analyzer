@@ -893,6 +893,14 @@ h3 {
   width: 100%;
 }
 
+.live-camera-frame video {
+  object-fit: cover;
+}
+
+.industrial-video-frame.portrait-video {
+  height: clamp(360px, 48svh, 560px);
+}
+
 .analysis-annotation-overlay {
   background: rgba(255, 255, 255, 0.94);
   border: 1px solid rgba(17, 131, 75, 0.28);
@@ -2036,6 +2044,11 @@ h3 {
     padding: 6px;
   }
 
+  .video-insights-row,
+  .video-workbench > .panel-note {
+    display: none;
+  }
+
   .workbench-toolbar,
   .sample-url-row {
     grid-template-columns: 1fr;
@@ -2137,6 +2150,16 @@ h3 {
     max-height: 180px;
     order: 1;
     width: 100%;
+  }
+
+  .industrial-video-frame.portrait-video.live-camera-frame {
+    height: clamp(238px, 40svh, 292px);
+    max-height: 292px;
+  }
+
+  .industrial-video-frame.landscape-video.live-camera-frame {
+    height: clamp(172px, 27svh, 210px);
+    max-height: 210px;
   }
 
   .first-fold-console {
