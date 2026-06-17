@@ -1,15 +1,16 @@
 import type { VideoAnalysisRequest } from "./videoSchema";
 
 export const VIDEO_ANALYTICS_SYSTEM_PROMPT = [
-  "You are a senior cloud video analytics system for physical AI demos.",
+  "You are a senior multimodal video analyst for physical AI demos.",
   "Analyze sampled video frames as a temporal sequence, not as unrelated photos.",
-  "Focus on scene understanding, objects, activity, safety/operational signals, and robot/actionable recommendations.",
+  "For general requests, first describe what is visibly happening in plain language, then explain what matters and what to do next.",
+  "For specific safety, zone, PPE, operations, or robotics requests, focus on that requested analytic.",
   "Be explicit about uncertainty. Do not invent people, objects, hazards, or events that are not visible.",
   "Return only the requested JSON shape.",
 ].join(" ");
 
 const modeFocus: Record<VideoAnalysisRequest["mode"], string> = {
-  industrial_general: "industrial scene, object, event, risk, alert, and action analysis",
+  industrial_general: "general video understanding, visible activity, important objects, practical interpretation, and next-step recommendations",
   person_zone: "person detection, restricted-zone entry, line-crossing, and alert triage",
   ppe: "PPE visibility, worker safety compliance, helmet/vest/glove cues, and confidence limits",
   safety: "unsafe proximity, slips/trips/falls, blocked exits, hazards, and incident triage",
@@ -42,17 +43,24 @@ export function buildVideoAnalysisPrompt(request: VideoAnalysisRequest): string 
         .join("\n")
     : "none";
 
+  const wantsSpecificAlert = request.mode !== "industrial_general" || /\b(alert|zone|ppe|hazard|risk|safety|detect|violation|intrusion|person|worker)\b/i.test(request.objective);
+  const alertInstruction = wantsSpecificAlert
+    ? "Populate alerts for the requested analytic when relevant. Use triggered=false with evidence when an expected condition is not met."
+    : "Do not force a safety or restricted-zone alert. Keep alerts empty unless the user's question or the visible scene clearly warrants an alert.";
+
   return [
     `Analyze this ${request.source} video sample for ${modeFocus[request.mode]}.`,
     `Customer analytics objective: ${request.objective}`,
-    `Drawn zones in normalized image coordinates: ${zoneSummary}. If a zone is relevant, map observations to the zoneId.`,
+    wantsSpecificAlert
+      ? `Drawn zones in normalized image coordinates: ${zoneSummary}. If a zone is relevant, map observations to the zoneId.`
+      : `Drawn zones in normalized image coordinates: ${zoneSummary}. Ignore zones unless the user explicitly asks for zone or boundary behavior.`,
     `The browser sent ${request.frames.length} keyframes instead of raw high-FPS video to reduce latency and cloud cost.`,
     `Sampling: target ${request.sampling.requestedFps} fps, max ${request.sampling.maxFrames} frames, jpeg quality ${request.sampling.jpegQuality}, payload ${request.sampling.payloadBytes} bytes.`,
     "Edge metrics per frame:",
     edgeSummary,
     localObjects.length ? "Local browser detections:\n" + localObjects.join("\n") : "Local browser detections: none above threshold.",
-    "Return practical results that could replace a narrow custom video analytics model for a live demo, while calling out residual uncertainty.",
-    "Populate alerts for the customer objective even when no alert is triggered. Use triggered=false with evidence when conditions are not met.",
+    "Return a practical answer suitable for a live demo. The headline and commentary should read like a direct answer to the user's plain-language question.",
+    alertInstruction,
     "Keep commentary punchy enough for live narration.",
   ].join("\n\n");
 }

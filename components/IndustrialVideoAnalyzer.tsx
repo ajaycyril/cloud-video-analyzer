@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, Camera, Crosshair, FileVideo, Pause, Play, Radar, RotateCcw, Send, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Camera, Crosshair, FileVideo, Pause, Play, Radar, RotateCcw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import { buildVideoConstraints, listVideoInputDevices, stopStream, type CameraFacing } from "@/lib/camera";
 import { canvasToJpegDataUrl, captureVideoFrame, computeEdgeMetrics, type EdgeMetricResult } from "@/lib/edgeMetrics";
@@ -60,6 +60,9 @@ const OBJECTIVE_PRESETS: Array<{ label: string; mode: VideoMode; objective: stri
     objective: "Analyze the scene using the user's custom instruction. Return alerts only when visible evidence supports them, and include uncertainty where needed.",
   },
 ];
+
+const DEFAULT_OBJECTIVE =
+  "Look at this video and tell me what is happening, what matters, and what I should do next. Be specific, practical, and only use visible evidence.";
 
 const SAMPLE_CLIPS: Array<{ label: string; url: string; note: string; mode: VideoMode; objective: string }> = [
   {
@@ -187,9 +190,9 @@ export function IndustrialVideoAnalyzer({
   const zoneInteractionRef = useRef<ZoneInteraction | null>(null);
 
   const [provider, setProvider] = useState<ProviderId>(providerStatus.gemini ? "gemini" : providerStatus.openai ? "openai" : "nvidia");
-  const [mode, setMode] = useState<VideoMode>("person_zone");
+  const [mode, setMode] = useState<VideoMode>("industrial_general");
   const [source, setSource] = useState<VideoSource>("camera");
-  const [objective, setObjective] = useState(OBJECTIVE_PRESETS[0].objective);
+  const [objective, setObjective] = useState(DEFAULT_OBJECTIVE);
   const [zones, setZones] = useState<Zone[]>([
     { id: "zone-1", label: "Restricted zone", x: 0.58, y: 0.2, w: 0.3, h: 0.58 },
   ]);
@@ -204,7 +207,6 @@ export function IndustrialVideoAnalyzer({
   const [sampleUrl, setSampleUrl] = useState(SAMPLE_CLIPS[1].url);
   const [analysis, setAnalysis] = useState<VideoAnalysisResponse | null>(null);
   const [analysesUsed, setAnalysesUsed] = useState(initialAnalysesUsed);
-  const [videoAspectRatio, setVideoAspectRatio] = useState("16 / 9");
   const [liveStatus, setLiveStatus] = useState("Gemini Live idle");
   const [liveRunning, setLiveRunning] = useState(false);
   const [liveEvents, setLiveEvents] = useState<string[]>([]);
@@ -230,13 +232,6 @@ export function IndustrialVideoAnalyzer({
     }
   }, [selectedDeviceId]);
 
-  const updateAspectRatio = useCallback(() => {
-    const video = videoRef.current;
-    if (video?.videoWidth && video.videoHeight) {
-      setVideoAspectRatio(`${video.videoWidth} / ${video.videoHeight}`);
-    }
-  }, []);
-
   const clearVideoObjectUrl = useCallback(() => {
     if (objectUrlRef.current) {
       URL.revokeObjectURL(objectUrlRef.current);
@@ -260,7 +255,6 @@ export function IndustrialVideoAnalyzer({
       videoRef.current.srcObject = stream;
       videoRef.current.controls = false;
       await videoRef.current.play();
-      updateAspectRatio();
       await refreshDevices();
       previousFrameRef.current = null;
       setRunning(true);
@@ -270,7 +264,7 @@ export function IndustrialVideoAnalyzer({
       setStatus("camera off - no recording");
       setError(readableError(startError));
     }
-  }, [cameraFacing, clearVideoObjectUrl, refreshDevices, selectedDeviceId, updateAspectRatio]);
+  }, [cameraFacing, clearVideoObjectUrl, refreshDevices, selectedDeviceId]);
 
   const stopCamera = useCallback(() => {
     setRunning(false);
@@ -514,6 +508,14 @@ export function IndustrialVideoAnalyzer({
     }
   }, [analysesUsed, mode, objective, provider, providerStatus, sampleFrames, source, zones]);
 
+  const recordOrAnalyze = useCallback(async () => {
+    if (source === "camera" && !running) {
+      await startCamera();
+      await new Promise((resolve) => window.setTimeout(resolve, 450));
+    }
+    await analyze();
+  }, [analyze, running, source, startCamera]);
+
   const reset = useCallback(() => {
     setError(null);
     setAnalysis(null);
@@ -725,10 +727,16 @@ export function IndustrialVideoAnalyzer({
   const isCloudSending = analyzing && status.startsWith("sending");
   const captureWindowSeconds = Math.round(CAMERA_CAPTURE_WINDOW_MS / 1000);
   const isLiveSource = source === "camera";
+  const isRecordingLocal = analyzing && !isCloudSending && isLiveSource;
+  const providerLabel = PROVIDER_COPY[provider].label;
   const sourceCaptureDetail = isLiveSource
     ? `Live camera: capture a ${captureWindowSeconds}s local burst, sample up to ${MAX_FRAMES} frames, then send selected JPEGs.`
     : `Uploaded/demo video: sample up to ${MAX_FRAMES} keyframes across the full clip duration, then send selected JPEGs.`;
-  const analyzeLabel = isLiveSource ? `Capture ${captureWindowSeconds}s + Analyze` : "Sample clip + Analyze";
+  const analyzeLabel = isLiveSource
+    ? running
+      ? `Record ${captureWindowSeconds}s + ask ${providerLabel}`
+      : `Start camera + record ${captureWindowSeconds}s`
+    : `Ask ${providerLabel} about this clip`;
   const cameraFacingLabel = cameraFacing === "environment" ? "Back camera" : "Front camera";
   const cameraCaptureState = isCloudSending
     ? "Sending sampled frames to cloud"
@@ -753,7 +761,13 @@ export function IndustrialVideoAnalyzer({
       : analysis
         ? "Cloud response received. Adjust the prompt or scene, then analyze again."
         : `Local only. ${sourceCaptureDetail}`;
-  const analyzeButtonText = analyzing ? (isCloudSending ? "Cloud analyzing..." : isLiveSource ? `Capturing ${captureWindowSeconds}s burst...` : "Sampling clip...") : analyzeLabel;
+  const analyzeButtonText = analyzing
+    ? isCloudSending
+      ? `Analyzing with ${providerLabel}...`
+      : isLiveSource
+        ? `Recording ${captureWindowSeconds}s...`
+        : "Sampling frames..."
+    : analyzeLabel;
   const quickPresets = OBJECTIVE_PRESETS.slice(0, 6);
 
   return (
@@ -761,8 +775,8 @@ export function IndustrialVideoAnalyzer({
       <header className="industrial-header">
         <div>
           <p className="eyebrow">Cloud video analytics API showcase</p>
-          <h1>Describe any video analytics. Get structured alerts.</h1>
-          <p className="app-subtitle">Point the camera, upload a clip, or run a sample. The browser samples keyframes locally, then sends only selected JPEG frames to Gemini/OpenAI for alerts, evidence, cost, and actions.</p>
+          <h1>Ask Gemini/OpenAI anything about live video.</h1>
+          <p className="app-subtitle">Point the camera, upload a clip, or run a sample. The browser samples keyframes locally, then sends only selected JPEG frames for a practical answer, evidence, cost, and next actions.</p>
         </div>
         <div className="loop">
           <span>video</span>
@@ -781,9 +795,8 @@ export function IndustrialVideoAnalyzer({
             onPointerMove={updateZoneDraw}
             onPointerUp={endZoneDraw}
             ref={videoFrameRef}
-            style={{ aspectRatio: videoAspectRatio }}
           >
-            <video muted onLoadedMetadata={updateAspectRatio} playsInline ref={videoRef} />
+            <video muted playsInline ref={videoRef} />
             {analysis ? (
               <div className="analysis-annotation-overlay" aria-label="Rendered AI annotations">
                 <strong>{analysis.headline}</strong>
@@ -824,17 +837,33 @@ export function IndustrialVideoAnalyzer({
             <div className="first-fold-header">
               <div>
                 <span>On-the-fly video analytics</span>
-                <strong>Type what to detect, choose video, get outcomes</strong>
+                <strong>Ask anything about this video</strong>
               </div>
               <small>{isLiveSource ? "Live camera burst" : "Full clip keyframe scan"}</small>
             </div>
 
             <label className="main-objective-box">
-              <span>What analytics do you want?</span>
-              <textarea onChange={(event) => setObjective(event.target.value)} placeholder="Example: detect if a person enters the marked area and recommend an action." value={objective} />
+              <span>Plain-language question for Gemini</span>
+              <textarea onChange={(event) => setObjective(event.target.value)} placeholder={DEFAULT_OBJECTIVE} value={objective} />
             </label>
 
+            <button className={`analyze-button first-fold-analyze ${isRecordingLocal ? "recording" : ""}`} disabled={analyzing} onClick={() => void recordOrAnalyze()} type="button">
+              <span className="record-dot" /> {analyzeButtonText}
+            </button>
+
+            <div className={`inline-result-preview ${analysis ? "ready" : ""}`}>
+              <span>Answer preview</span>
+              <strong>{analysis?.headline ?? "Answer appears here"}</strong>
+              <p>{analysis?.commentary ?? "Record or analyze once. The first answer stays visible here, not below the fold."}</p>
+            </div>
+
             <div className="quick-preset-row" aria-label="Example analytics">
+              <button className={objective === DEFAULT_OBJECTIVE ? "active" : ""} onClick={() => {
+                setObjective(DEFAULT_OBJECTIVE);
+                setMode("industrial_general");
+              }} type="button">
+                General query
+              </button>
               {quickPresets.map((preset) => (
                 <button className={objective === preset.objective ? "active" : ""} key={`quick-${preset.label}`} onClick={() => applyPreset(preset)} type="button">
                   {preset.label}
@@ -886,16 +915,6 @@ export function IndustrialVideoAnalyzer({
                   ? "Only selected JPEG keyframes are in the cloud now."
                   : `${sourceCaptureDetail} Full video is not uploaded.`}
               </span>
-            </div>
-
-            <button className="analyze-button first-fold-analyze" disabled={analyzing} onClick={analyze} type="button">
-              <Send size={17} /> {analyzeButtonText}
-            </button>
-
-            <div className={`inline-result-preview ${analysis ? "ready" : ""}`}>
-              <span>Result preview</span>
-              <strong>{analysis?.headline ?? "No result yet"}</strong>
-              <p>{analysis?.commentary ?? "Run the workflow and the first structured result appears here immediately."}</p>
             </div>
           </div>
 
@@ -1031,12 +1050,12 @@ export function IndustrialVideoAnalyzer({
       <section className="result-grid">
         <div className="panel result-hero">
           <div className="panel-heading">
-            <h2>{analysis?.headline ?? "Structured video analytics output"}</h2>
+            <h2>{analysis?.headline ?? "Detailed video answer"}</h2>
             <span>{analysis ? `${analysis.provider} / ${analysis.model}` : modeLabel(mode)}</span>
           </div>
           <p className="summary">
             {analysis?.commentary ??
-              "Run a clip to get scene understanding, person/PPE/zone alerts, timeline evidence, safety risks, and recommended human or robotic actions."}
+              "Run a clip to get scene understanding, timeline evidence, safety or operations notes when relevant, and recommended human or robotic actions."}
           </p>
           {analysis ? (
             <div className="metric-grid">
