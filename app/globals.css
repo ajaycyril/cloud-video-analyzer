@@ -1215,6 +1215,157 @@ h3 {
   margin: 0;
 }
 
+.scene-result-card {
+  background:
+    linear-gradient(180deg, #ffffff, #f8fbf8),
+    radial-gradient(circle at 0% 0%, rgba(17, 131, 75, 0.12), transparent 18rem);
+  border: 1px solid rgba(16, 32, 25, 0.1);
+  border-radius: 18px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72);
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+
+.scene-result-card.ready {
+  border-color: rgba(17, 131, 75, 0.34);
+  box-shadow: 0 18px 42px rgba(17, 131, 75, 0.12);
+}
+
+.scene-result-card.loading {
+  border-color: rgba(183, 121, 0, 0.32);
+}
+
+.scene-result-card:not(.ready):not(.loading) {
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.scene-result-card:not(.ready):not(.loading) p,
+.scene-result-card:not(.ready):not(.loading) .scene-result-metrics,
+.scene-result-card:not(.ready):not(.loading) .scene-summary-block,
+.scene-result-card:not(.ready):not(.loading) .edge-signal-row,
+.scene-result-card:not(.ready):not(.loading) .object-chip-row {
+  display: none;
+}
+
+.scene-result-topline,
+.scene-result-metrics,
+.edge-model-strip,
+.edge-signal-row,
+.object-chip-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.scene-result-topline {
+  justify-content: space-between;
+}
+
+.scene-result-topline span,
+.scene-summary-block span,
+.next-action-card span,
+.edge-model-strip span,
+.scene-result-metrics span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.scene-result-topline strong {
+  background: var(--green-soft);
+  border: 1px solid rgba(17, 131, 75, 0.22);
+  border-radius: 999px;
+  color: var(--green);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.scene-result-card h2 {
+  font-size: 22px;
+  line-height: 1.1;
+  margin: 0;
+}
+
+.scene-result-card:not(.ready):not(.loading) h2 {
+  font-size: 16px;
+}
+
+.scene-result-card p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+  margin: 0;
+}
+
+.scene-result-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.scene-result-metrics div,
+.edge-model-strip div {
+  background: rgba(238, 244, 241, 0.78);
+  border: 1px solid rgba(16, 32, 25, 0.07);
+  border-radius: 12px;
+  min-width: 0;
+  padding: 8px;
+}
+
+.scene-result-metrics strong,
+.edge-model-strip strong {
+  display: block;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scene-summary-block,
+.next-action-card {
+  background: rgba(17, 131, 75, 0.08);
+  border: 1px solid rgba(17, 131, 75, 0.16);
+  border-radius: 12px;
+  display: grid;
+  gap: 4px;
+  padding: 9px;
+}
+
+.scene-summary-block strong,
+.next-action-card strong {
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.edge-model-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.edge-signal-row,
+.object-chip-row {
+  flex-wrap: wrap;
+}
+
+.edge-signal-row span,
+.object-chip-row span {
+  background: #ffffff;
+  border: 1px solid rgba(16, 32, 25, 0.08);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  padding: 5px 8px;
+}
+
+.object-chip-row span {
+  color: var(--text);
+}
+
 .video-insights-row {
   display: grid;
   gap: 8px;
@@ -2246,6 +2397,60 @@ h3 {
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
+  }
+
+  .scene-result-card {
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .scene-result-card h2 {
+    display: -webkit-box;
+    font-size: 15px;
+    line-height: 1.12;
+    line-clamp: 2;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .scene-result-card p,
+  .scene-summary-block,
+  .next-action-card {
+    display: none;
+  }
+
+  .scene-result-topline strong {
+    font-size: 10px;
+    padding: 4px 6px;
+  }
+
+  .scene-result-metrics,
+  .edge-model-strip {
+    gap: 4px;
+  }
+
+  .scene-result-metrics div,
+  .edge-model-strip div {
+    padding: 6px;
+  }
+
+  .scene-result-metrics strong,
+  .edge-model-strip strong {
+    font-size: 11px;
+  }
+
+  .edge-signal-row {
+    display: none;
+  }
+
+  .object-chip-row {
+    gap: 4px;
+  }
+
+  .object-chip-row span {
+    font-size: 10px;
+    padding: 4px 6px;
   }
 
   .primary-samples {

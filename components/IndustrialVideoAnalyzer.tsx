@@ -121,6 +121,30 @@ function payloadBytes(frames: SampledFrame[]): number {
   return frames.reduce((total, frame) => total + frame.imageDataUrl.length, 0);
 }
 
+function average(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+function summarizeEdgeDetections(frames: SampledFrame[]): Array<{ label: string; count: number; score: number }> {
+  const byLabel = new Map<string, { label: string; count: number; score: number }>();
+  for (const detection of frames.flatMap((frame) => frame.localDetections)) {
+    const key = detection.label.toLowerCase();
+    const current = byLabel.get(key);
+    if (current) {
+      current.count += 1;
+      current.score = Math.max(current.score, detection.score);
+    } else {
+      byLabel.set(key, { label: detection.label, count: 1, score: detection.score });
+    }
+  }
+  return Array.from(byLabel.values())
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 5);
+}
+
 function waitForVideoData(video: HTMLVideoElement): Promise<void> {
   if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
     return Promise.resolve();
@@ -207,8 +231,10 @@ export function IndustrialVideoAnalyzer({
   const [cameraFacing, setCameraFacing] = useState<CameraFacing>("environment");
   const [sampleUrl, setSampleUrl] = useState(SAMPLE_CLIPS[1].url);
   const [analysis, setAnalysis] = useState<VideoAnalysisResponse | null>(null);
+  const [lastFrames, setLastFrames] = useState<SampledFrame[]>([]);
   const [analysesUsed, setAnalysesUsed] = useState(initialAnalysesUsed);
   const [videoOrientation, setVideoOrientation] = useState<VideoOrientation>("landscape-video");
+  const [hasWebGpu] = useState(() => typeof navigator !== "undefined" && "gpu" in navigator);
   const [liveStatus, setLiveStatus] = useState("Gemini Live idle");
   const [liveRunning, setLiveRunning] = useState(false);
   const [liveEvents, setLiveEvents] = useState<string[]>([]);
@@ -477,6 +503,7 @@ export function IndustrialVideoAnalyzer({
     setStatus("extracting relevant frames in browser");
     try {
       const frames = await sampleFrames();
+      setLastFrames(frames);
       setStatus(`sending ${frames.length} sampled frames to ${provider}`);
       const response = await fetch("/api/analyze-video", {
         method: "POST",
@@ -530,6 +557,7 @@ export function IndustrialVideoAnalyzer({
   const reset = useCallback(() => {
     setError(null);
     setAnalysis(null);
+    setLastFrames([]);
     setStatus(running ? `preview only - ${cameraFacing === "environment" ? "back" : "front"} camera - no cloud upload` : "camera off - no recording");
     previousFrameRef.current = null;
   }, [cameraFacing, running]);
@@ -780,6 +808,14 @@ export function IndustrialVideoAnalyzer({
         : "Sampling frames..."
     : analyzeLabel;
   const quickPresets = OBJECTIVE_PRESETS.slice(0, 6);
+  const edgeDetections = summarizeEdgeDetections(lastFrames);
+  const edgeBrightness = Math.round(average(lastFrames.map((frame) => frame.edgeMetrics.brightness)));
+  const edgeSharpness = Math.round(average(lastFrames.map((frame) => frame.edgeMetrics.sharpness)));
+  const edgeStability = Math.round(average(lastFrames.map((frame) => frame.edgeMetrics.stability)));
+  const edgeQuality = Math.round(average(lastFrames.map((frame) => (frame.edgeMetrics.brightness + frame.edgeMetrics.sharpness + frame.edgeMetrics.stability) / 3)));
+  const primaryAction = analysis?.recommendations[0];
+  const visibleObjects = analysis?.objects.slice(0, 4) ?? [];
+  const resultStatus = analysis ? "Scene result" : analyzing ? "Analyzing scene" : "Ready for scene result";
 
   return (
     <main className="industrial-shell">
@@ -853,6 +889,65 @@ export function IndustrialVideoAnalyzer({
               <small>{isLiveSource ? "Live camera burst" : "Full clip keyframe scan"}</small>
             </div>
 
+            <div className={`scene-result-card ${analysis ? "ready" : analyzing ? "loading" : ""}`}>
+              <div className="scene-result-topline">
+                <span>{resultStatus}</span>
+                <strong>{analysis ? `${Math.round(analysis.confidence)}% confidence` : analyzing ? "Working..." : "No cloud call yet"}</strong>
+              </div>
+              <h2>{analysis?.headline ?? "Point camera, record, get the answer here"}</h2>
+              <p>{analysis?.commentary ?? "The main result will appear in this card: what is happening, confidence, edge detections, cost, and the next action."}</p>
+              <div className="scene-result-metrics">
+                <div>
+                  <span>Frames</span>
+                  <strong>{analysis?.edgeAssessment.framesAnalyzed ?? (lastFrames.length || "--")}</strong>
+                </div>
+                <div>
+                  <span>Latency</span>
+                  <strong>{analysis ? `${analysis.usage.latencyMs}ms` : "--"}</strong>
+                </div>
+                <div>
+                  <span>Cost</span>
+                  <strong>{analysis ? formatCost(analysis.usage.estimatedCostUsd) : "$0.0000"}</strong>
+                </div>
+              </div>
+              {analysis ? (
+                <div className="scene-summary-block">
+                  <span>Scene</span>
+                  <strong>{analysis.scene.summary}</strong>
+                </div>
+              ) : null}
+              <div className="edge-model-strip">
+                <div>
+                  <span>Free edge model</span>
+                  <strong>MediaPipe EfficientDet Lite</strong>
+                </div>
+                <div>
+                  <span>WebGPU / Gemma-class slot</span>
+                  <strong>{hasWebGpu ? "Browser ready" : "Not available"}</strong>
+                </div>
+              </div>
+              <div className="edge-signal-row">
+                <span>Edge quality {lastFrames.length ? `${edgeQuality}%` : "--"}</span>
+                <span>Light {lastFrames.length ? `${edgeBrightness}%` : "--"}</span>
+                <span>Sharp {lastFrames.length ? `${edgeSharpness}%` : "--"}</span>
+                <span>Stable {lastFrames.length ? `${edgeStability}%` : "--"}</span>
+              </div>
+              <div className="object-chip-row">
+                {(edgeDetections.length ? edgeDetections : visibleObjects.map((object) => ({ label: object.label, count: object.count, score: analysis?.confidence ? analysis.confidence / 100 : 0 }))).map((object) => (
+                  <span key={`${object.label}-${object.count}`}>
+                    {object.label} {object.count > 1 ? `x${object.count}` : ""} {object.score ? `${Math.round(object.score * 100)}%` : ""}
+                  </span>
+                ))}
+                {!edgeDetections.length && !visibleObjects.length ? <span>No edge objects yet</span> : null}
+              </div>
+              {primaryAction ? (
+                <div className="next-action-card">
+                  <span>Next action</span>
+                  <strong>{primaryAction.action}</strong>
+                </div>
+              ) : null}
+            </div>
+
             <label className="main-objective-box">
               <span>Plain-language question for Gemini</span>
               <textarea onChange={(event) => setObjective(event.target.value)} placeholder={DEFAULT_OBJECTIVE} value={objective} />
@@ -861,12 +956,6 @@ export function IndustrialVideoAnalyzer({
             <button className={`analyze-button first-fold-analyze ${isRecordingLocal ? "recording" : ""}`} disabled={analyzing} onClick={() => void recordOrAnalyze()} type="button">
               <span className="record-dot" /> {analyzeButtonText}
             </button>
-
-            <div className={`inline-result-preview ${analysis ? "ready" : ""}`}>
-              <span>Answer preview</span>
-              <strong>{analysis?.headline ?? "Answer appears here"}</strong>
-              <p>{analysis?.commentary ?? "Record or analyze once. The first answer stays visible here, not below the fold."}</p>
-            </div>
 
             <div className="quick-preset-row" aria-label="Example analytics">
               <button className={objective === DEFAULT_OBJECTIVE ? "active" : ""} onClick={() => {
