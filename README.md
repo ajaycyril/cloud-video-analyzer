@@ -87,6 +87,7 @@ Structured video analytics response
 - Gemini API via `@google/genai`
 - OpenAI-compatible Responses API flow for vision frames
 - MediaPipe Tasks Vision for browser-side object detection hooks
+- Optional Roboflow hosted object detection enrichment
 - Browser canvas keyframe extraction
 - Vercel production deployment
 
@@ -94,12 +95,18 @@ Structured video analytics response
 
 ```bash
 GEMINI_API_KEY=
-GEMINI_MODEL=gemini-3-flash-preview
+GEMINI_MODEL=gemini-3.5-flash
+GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview
 OPENAI_API_KEY=
-OPENAI_MODEL=gpt-4o-mini
+OPENAI_MODEL=gpt-5.4-mini
 NVIDIA_API_KEY=
 NVIDIA_MODEL=nvidia/cosmos3-nano-reasoner
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+ROBOFLOW_API_KEY=
+ROBOFLOW_INFERENCE_API_KEY=
+ROBOFLOW_MODEL=
+ROBOFLOW_CONFIDENCE=45
+ROBOFLOW_OVERLAP=30
 NEXT_PUBLIC_DEMO_ANALYSIS_LIMIT=20
 DEMO_MAX_REQUEST_BYTES=2500000
 DEMO_RATE_LIMIT_WINDOW_MS=60000

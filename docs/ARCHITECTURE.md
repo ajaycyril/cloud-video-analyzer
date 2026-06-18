@@ -9,6 +9,7 @@ camera/file/sample video
   -> browser keyframe sampler
   -> edge quality + motion metrics
   -> optional local object detections
+  -> optional Roboflow specialist detections
   -> plain-language objective + zones
   -> /api/analyze-video
   -> Gemini / OpenAI Vision / NVIDIA Cosmos adapter
@@ -23,6 +24,7 @@ The browser reduces cloud cost and latency before any API call:
 - Compresses frames as JPEG.
 - Computes brightness, contrast, sharpness, edge density, motion, stability, and visual complexity.
 - Runs local object detection when the model asset is available.
+- Optionally enriches sampled frames through Roboflow hosted object detection when `ROBOFLOW_API_KEY` or `ROBOFLOW_INFERENCE_API_KEY` plus `ROBOFLOW_MODEL` are configured.
 - Sends drawn zones as normalized coordinates.
 - The API caps cloud calls to the best three sampled frames by local quality score.
 
@@ -43,6 +45,8 @@ The browser reduces cloud cost and latency before any API call:
 OpenAI uses the Responses API with `input_text` for the analytics objective and `input_image` entries for sampled video frames. It is not a native full-video upload path.
 
 NVIDIA Cosmos is integrated as a physical-world reasoning provider using the NVIDIA NIM endpoint shape. Its default model is `nvidia/cosmos3-nano-reasoner`, which NVIDIA Build lists as a free endpoint for development and a vision-language model for physical-world reasoning on video or images.
+
+Roboflow is integrated as a specialist detection layer, not a general reasoning provider. The browser still samples frames locally, then `/api/roboflow-detect` can add detector boxes before the selected frames are sent to Gemini/OpenAI/NVIDIA for natural-language analysis, alerts, and recommended actions. Roboflow requires an API key and a concrete hosted model endpoint such as `project/version`.
 
 ## Production Considerations
 

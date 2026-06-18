@@ -10,6 +10,7 @@ export default function Home() {
         openai: Boolean(process.env.OPENAI_API_KEY),
         nvidia: Boolean(process.env.NVIDIA_API_KEY),
       }}
+      roboflowReady={Boolean((process.env.ROBOFLOW_API_KEY || process.env.ROBOFLOW_INFERENCE_API_KEY) && process.env.ROBOFLOW_MODEL)}
     />
   );
 }

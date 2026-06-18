@@ -33,6 +33,7 @@ export async function POST() {
           model,
           config: {
             responseModalities: [Modality.AUDIO],
+            outputAudioTranscription: {},
             temperature: 0.2,
           },
         },

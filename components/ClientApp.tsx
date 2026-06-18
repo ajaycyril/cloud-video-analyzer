@@ -7,7 +7,7 @@ import { getBrowserCapabilities } from "@/lib/browserCapabilities";
 import type { CapabilityResult } from "@/lib/types";
 import type { ProviderId } from "@/lib/videoSchema";
 
-export function ClientApp({ providerStatus }: { providerStatus: Record<ProviderId, boolean> }) {
+export function ClientApp({ providerStatus, roboflowReady }: { providerStatus: Record<ProviderId, boolean>; roboflowReady: boolean }) {
   const [capabilityResult, setCapabilityResult] = useState<CapabilityResult | null>(null);
 
   useEffect(() => {
@@ -19,7 +19,7 @@ export function ClientApp({ providerStatus }: { providerStatus: Record<ProviderI
 
   return (
     <CapabilityGate result={capabilityResult}>
-      <IndustrialVideoAnalyzer providerStatus={providerStatus} />
+      <IndustrialVideoAnalyzer providerStatus={providerStatus} roboflowReady={roboflowReady} />
     </CapabilityGate>
   );
 }

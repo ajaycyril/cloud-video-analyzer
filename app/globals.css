@@ -1216,6 +1216,106 @@ h3 {
   margin: 0;
 }
 
+.gemini-live-card {
+  background: linear-gradient(180deg, rgba(11, 120, 168, 0.08), rgba(255, 255, 255, 0.92));
+  border: 1px solid rgba(11, 120, 168, 0.18);
+  border-radius: 16px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.gemini-live-card.active {
+  border-color: rgba(17, 131, 75, 0.34);
+  box-shadow: 0 14px 34px rgba(17, 131, 75, 0.1);
+}
+
+.gemini-live-topline,
+.gemini-live-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.gemini-live-topline span {
+  color: var(--blue);
+  display: block;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.gemini-live-topline strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.gemini-live-topline small {
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgba(11, 120, 168, 0.16);
+  border-radius: 999px;
+  color: var(--blue);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 11px;
+  padding: 5px 8px;
+  white-space: nowrap;
+}
+
+.gemini-live-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.gemini-live-actions button {
+  min-height: 38px;
+}
+
+.gemini-live-card.active .gemini-live-actions button:first-child {
+  background: var(--green-soft);
+  border-color: rgba(17, 131, 75, 0.3);
+}
+
+.gemini-live-feed {
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgba(16, 32, 25, 0.08);
+  border-radius: 12px;
+  display: grid;
+  gap: 5px;
+  max-height: 154px;
+  overflow: auto;
+  padding: 9px;
+}
+
+.gemini-live-feed > strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.gemini-live-feed p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  margin: 0;
+}
+
+.gemini-live-events {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.gemini-live-events small {
+  background: rgba(238, 244, 241, 0.9);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10px;
+  padding: 4px 6px;
+}
+
 .first-fold-analyze {
   border-radius: 14px;
   font-size: 16px;
@@ -1532,6 +1632,83 @@ h3 {
 
 .detected-object-row {
   align-items: center;
+}
+
+.detected-object-row small {
+  color: var(--muted);
+  flex-basis: 100%;
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.evidence-frame-panel {
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(16, 32, 25, 0.08);
+  border-radius: 12px;
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+}
+
+.evidence-frame-topline {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.evidence-frame-topline span {
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.evidence-frame-topline strong {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.evidence-frame-image {
+  aspect-ratio: 16 / 9;
+  background: #0d1512;
+  border-radius: 10px;
+  max-height: 190px;
+  overflow: hidden;
+  position: relative;
+}
+
+.evidence-frame-image img {
+  display: block;
+  height: 100%;
+  object-fit: contain;
+  width: 100%;
+}
+
+.evidence-box {
+  border: 2px solid #19c37d;
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px rgba(2, 23, 14, 0.35), 0 8px 20px rgba(0, 0, 0, 0.2);
+  min-height: 16px;
+  min-width: 18px;
+  position: absolute;
+}
+
+.evidence-box span {
+  background: #19c37d;
+  border-radius: 999px;
+  color: #06140d;
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 850;
+  left: -2px;
+  max-width: 150px;
+  overflow: hidden;
+  padding: 2px 6px;
+  position: absolute;
+  text-overflow: ellipsis;
+  top: -20px;
+  white-space: nowrap;
 }
 
 .detected-object-grid {
@@ -2728,6 +2905,31 @@ h3 {
     font-size: 9px;
   }
 
+  .detected-object-row small {
+    font-size: 10px;
+  }
+
+  .evidence-frame-panel {
+    gap: 5px;
+    padding: 6px;
+  }
+
+  .evidence-frame-image {
+    max-height: 110px;
+  }
+
+  .evidence-box {
+    border-width: 1.5px;
+    border-radius: 4px;
+  }
+
+  .evidence-box span {
+    font-size: 8px;
+    max-width: 90px;
+    padding: 1px 4px;
+    top: -15px;
+  }
+
   .full-response-panel {
     gap: 5px;
   }
@@ -2760,7 +2962,34 @@ h3 {
   }
 
   .primary-samples {
-    display: none;
+    margin-right: -7px;
+  }
+
+  .gemini-live-card {
+    gap: 5px;
+    padding: 7px;
+  }
+
+  .gemini-live-topline strong {
+    font-size: 12px;
+  }
+
+  .gemini-live-actions button {
+    min-height: 34px;
+  }
+
+  .gemini-live-feed {
+    max-height: 82px;
+    padding: 7px;
+  }
+
+  .gemini-live-feed p {
+    display: -webkit-box;
+    font-size: 11px;
+    line-clamp: 2;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
 
   .capture-disclosure {

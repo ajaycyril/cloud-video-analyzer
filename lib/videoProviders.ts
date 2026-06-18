@@ -10,7 +10,7 @@ import {
   type VideoAnalysisResponse,
 } from "./videoSchema";
 
-const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
+const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash";
 const DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
 const DEFAULT_NVIDIA_MODEL = "nvidia/cosmos3-nano-reasoner";
 const DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
