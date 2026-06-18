@@ -64,6 +64,7 @@ export function getBrowserCapabilities(): CapabilityResult {
       hasCanvasImageData: false,
       hasWebGPU: false,
       issues: ["Browser APIs are not available on the server."],
+      warnings: [],
     };
   }
 
@@ -86,17 +87,18 @@ export function getBrowserCapabilities(): CapabilityResult {
   }
 
   const issues: string[] = [];
+  const warnings: string[] = [];
+  if (!hasCanvasImageData) {
+    issues.push("Canvas ImageData is required to sample frames from camera, uploaded clips, or demo videos.");
+  }
   if (!window.isSecureContext) {
-    issues.push("A secure context is required. Use HTTPS or localhost.");
+    warnings.push("Camera access requires HTTPS or localhost. Uploaded clips can still be analyzed when canvas is available.");
   }
   if (!hasMediaDevices) {
-    issues.push("Camera access is not available in this browser.");
+    warnings.push("Camera access is not available in this browser. Upload a clip or use a demo video.");
   }
   if (!hasWebAssembly) {
-    issues.push("WebAssembly is required for local MediaPipe inference.");
-  }
-  if (!hasCanvasImageData) {
-    issues.push("Canvas ImageData is required for edge video metrics.");
+    warnings.push("Local object hints are disabled because WebAssembly is unavailable. Cloud analysis still works from sampled frames.");
   }
 
   return {
@@ -109,5 +111,6 @@ export function getBrowserCapabilities(): CapabilityResult {
     hasCanvasImageData,
     hasWebGPU,
     issues,
+    warnings,
   };
 }

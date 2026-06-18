@@ -1,11 +1,11 @@
 "use client";
 
-import { AlertTriangle, Camera, Crosshair, FileVideo, Pause, Play, Radar, RotateCcw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Camera, Crosshair, FileVideo, Pause, Play, Radar, RotateCcw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import { buildVideoConstraints, listVideoInputDevices, stopStream, type CameraFacing } from "@/lib/camera";
 import { canvasToJpegDataUrl, captureVideoFrame, computeEdgeMetrics, type EdgeMetricResult } from "@/lib/edgeMetrics";
-import { createObjectDetector, detectObjectsForVideo } from "@/lib/mediaPipeDetector";
-import { fallbackObjectChips, summarizeEdgeRuntime } from "@/lib/resultPresentation";
+import { detectObjectsForVideo, tryCreateObjectDetector } from "@/lib/mediaPipeDetector";
+import { fallbackObjectChips, summarizeEdgeDetections } from "@/lib/resultPresentation";
 import type { LocalDetection } from "@/lib/types";
 import type { ProviderId, SampledFrame, VideoAnalysisResponse, VideoMode, VideoSource, Zone } from "@/lib/videoSchema";
 
@@ -19,6 +19,14 @@ type VideoOrientation = "landscape-video" | "portrait-video";
 type ZoneInteraction =
   | { kind: "draw"; start: { x: number; y: number } }
   | { kind: "resize"; corner: ZoneCorner; zone: Zone };
+
+type HoldRecording = {
+  active: boolean;
+  stopRequested: boolean;
+  frames: SampledFrame[];
+  pointerId: number | null;
+  startedAt: number;
+};
 
 const MAX_FRAMES = 5;
 const CAMERA_CAPTURE_WINDOW_MS = 2000;
@@ -156,17 +164,6 @@ function waitForVideoData(video: HTMLVideoElement): Promise<void> {
   });
 }
 
-function modeLabel(mode: VideoMode): string {
-  const labels: Record<VideoMode, string> = {
-    industrial_general: "Industrial",
-    person_zone: "Person zone",
-    ppe: "PPE",
-    safety: "Safety",
-    operations: "Operations",
-  };
-  return labels[mode];
-}
-
 function initialAnalysesUsed(): number {
   if (typeof window === "undefined") {
     return 0;
@@ -190,7 +187,13 @@ export function IndustrialVideoAnalyzer({
   const liveTimerRef = useRef<number | null>(null);
   const previousFrameRef = useRef<EdgeMetricResult["snapshot"] | null>(null);
   const zoneInteractionRef = useRef<ZoneInteraction | null>(null);
-  const continuousAnalysisRef = useRef(false);
+  const holdRecordingRef = useRef<HoldRecording>({
+    active: false,
+    stopRequested: false,
+    frames: [],
+    pointerId: null,
+    startedAt: 0,
+  });
   const analysesUsedRef = useRef(0);
 
   const [provider, setProvider] = useState<ProviderId>(providerStatus.gemini ? "gemini" : providerStatus.openai ? "openai" : "nvidia");
@@ -205,7 +208,7 @@ export function IndustrialVideoAnalyzer({
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
-  const [continuousAnalyzing, setContinuousAnalyzing] = useState(false);
+  const [holdRecording, setHoldRecording] = useState(false);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [cameraFacing, setCameraFacing] = useState<CameraFacing>("environment");
@@ -214,14 +217,14 @@ export function IndustrialVideoAnalyzer({
   const [lastFrames, setLastFrames] = useState<SampledFrame[]>([]);
   const [analysesUsed, setAnalysesUsed] = useState(initialAnalysesUsed);
   const [videoOrientation, setVideoOrientation] = useState<VideoOrientation>("landscape-video");
-  const [hasWebGpu] = useState(() => typeof navigator !== "undefined" && "gpu" in navigator);
   const [liveStatus, setLiveStatus] = useState("Gemini Live idle");
   const [liveRunning, setLiveRunning] = useState(false);
   const [liveEvents, setLiveEvents] = useState<string[]>([]);
 
   useEffect(() => {
     return () => {
-      continuousAnalysisRef.current = false;
+      holdRecordingRef.current.active = false;
+      holdRecordingRef.current.stopRequested = true;
       if (liveTimerRef.current) {
         window.clearInterval(liveTimerRef.current);
       }
@@ -302,8 +305,9 @@ export function IndustrialVideoAnalyzer({
   }, [cameraFacing, clearVideoObjectUrl, refreshDevices, selectedDeviceId, updateVideoOrientation]);
 
   const stopCamera = useCallback(() => {
-    continuousAnalysisRef.current = false;
-    setContinuousAnalyzing(false);
+    holdRecordingRef.current.active = false;
+    holdRecordingRef.current.stopRequested = true;
+    setHoldRecording(false);
     setRunning(false);
     setStatus("camera off - no recording");
     stopStream(streamRef.current);
@@ -453,7 +457,7 @@ export function IndustrialVideoAnalyzer({
     }
     setStatus("waiting for video frame");
     await waitForVideoData(video);
-    await createObjectDetector();
+    await tryCreateObjectDetector();
     previousFrameRef.current = null;
     const frames: SampledFrame[] = [];
 
@@ -487,7 +491,7 @@ export function IndustrialVideoAnalyzer({
     return frames;
   }, [captureOneFrame, seekVideo, source]);
 
-  const analyze = useCallback(async ({ keepPreviousResult = false }: { keepPreviousResult?: boolean } = {}) => {
+  const submitFramesForAnalysis = useCallback(async (frames: SampledFrame[]) => {
     if (!providerStatus[provider]) {
       setError(`${provider.toUpperCase()} API key is not configured on the server.`);
       return false;
@@ -496,15 +500,13 @@ export function IndustrialVideoAnalyzer({
       setError("Demo analysis limit reached for this browser session.");
       return false;
     }
-
-    setAnalyzing(true);
-    setError(null);
-    if (!keepPreviousResult) {
-      setAnalysis(null);
+    if (!frames.length) {
+      setError("No usable frames were captured. Hold the record button while pointing at the scene.");
+      return false;
     }
-    setStatus("extracting relevant frames in browser");
+
+    setError(null);
     try {
-      const frames = await sampleFrames();
       setLastFrames(frames);
       setStatus(`sending ${frames.length} sampled frames to ${provider}`);
       const response = await fetch("/api/analyze-video", {
@@ -540,57 +542,124 @@ export function IndustrialVideoAnalyzer({
       setAnalysesUsed(nextUsage);
       window.sessionStorage.setItem("cloud-video-analyzer-analyses-used", String(nextUsage));
       setAnalysis(nextAnalysis);
+      setError(null);
       setStatus(`${provider} analysis complete in ${nextAnalysis.usage.latencyMs}ms`);
       return true;
     } catch (analysisError) {
       setError(readableError(analysisError));
       setStatus("analysis error");
       return false;
+    }
+  }, [mode, objective, provider, providerStatus, source, zones]);
+
+  const analyze = useCallback(async () => {
+    setAnalyzing(true);
+    setError(null);
+    setAnalysis(null);
+    setStatus("extracting relevant frames in browser");
+    try {
+      const frames = await sampleFrames();
+      return await submitFramesForAnalysis(frames);
     } finally {
       setAnalyzing(false);
     }
-  }, [mode, objective, provider, providerStatus, sampleFrames, source, zones]);
+  }, [sampleFrames, submitFramesForAnalysis]);
 
-  const startContinuousAnalysis = useCallback(async () => {
-    if (continuousAnalysisRef.current) {
+  const beginHoldRecording = useCallback(async (event?: PointerEvent<HTMLButtonElement>) => {
+    if (source !== "camera" || analyzing || holdRecordingRef.current.active) {
       return;
     }
+    if (event) {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }
     setError(null);
-    if (source === "camera" && !running) {
-      await startCamera();
-      await new Promise((resolve) => window.setTimeout(resolve, 450));
-    }
-    continuousAnalysisRef.current = true;
-    setContinuousAnalyzing(true);
-    setStatus("live analysis loop started");
-    while (continuousAnalysisRef.current && analysesUsedRef.current < DEMO_ANALYSIS_LIMIT) {
-      const ok = await analyze({ keepPreviousResult: true });
-      if (!ok) {
-        break;
+    setAnalysis(null);
+    setAnalyzing(true);
+    setHoldRecording(true);
+    holdRecordingRef.current = {
+      active: true,
+      stopRequested: false,
+      frames: [],
+      pointerId: event?.pointerId ?? null,
+      startedAt: performance.now(),
+    };
+
+    try {
+      if (!running) {
+        await startCamera();
+        await new Promise((resolve) => window.setTimeout(resolve, 450));
       }
-      if (continuousAnalysisRef.current) {
-        setStatus("live loop waiting for next burst");
-        await new Promise((resolve) => window.setTimeout(resolve, 650));
+
+      const video = videoRef.current;
+      if (!video) {
+        throw new Error("Video element is not ready.");
       }
+      await waitForVideoData(video);
+      await tryCreateObjectDetector();
+      previousFrameRef.current = null;
+      setStatus("recording locally - release to analyze");
+
+      while (holdRecordingRef.current.active && !holdRecordingRef.current.stopRequested) {
+        const elapsedMs = Math.max(0, performance.now() - holdRecordingRef.current.startedAt);
+        const frame = await captureOneFrame(elapsedMs);
+        if (frame) {
+          const nextFrames = [...holdRecordingRef.current.frames, frame].slice(-MAX_FRAMES);
+          holdRecordingRef.current.frames = nextFrames;
+          setLastFrames(nextFrames);
+          setStatus(`recording locally - ${nextFrames.length} selected frame${nextFrames.length === 1 ? "" : "s"}`);
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 420));
+      }
+
+      if (!holdRecordingRef.current.frames.length) {
+        const frame = await captureOneFrame(Math.max(0, performance.now() - holdRecordingRef.current.startedAt));
+        if (frame) {
+          holdRecordingRef.current.frames = [frame];
+          setLastFrames([frame]);
+        }
+      }
+
+      const frames = holdRecordingRef.current.frames;
+      holdRecordingRef.current.active = false;
+      holdRecordingRef.current.stopRequested = false;
+      setHoldRecording(false);
+      await submitFramesForAnalysis(frames);
+    } catch (recordError) {
+      holdRecordingRef.current.active = false;
+      holdRecordingRef.current.stopRequested = false;
+      setHoldRecording(false);
+      setError(readableError(recordError));
+      setStatus("analysis error");
+    } finally {
+      setAnalyzing(false);
     }
-    if (analysesUsedRef.current >= DEMO_ANALYSIS_LIMIT) {
-      setError("Demo analysis limit reached for this browser session.");
+  }, [analyzing, captureOneFrame, running, source, startCamera, submitFramesForAnalysis]);
+
+  const finishHoldRecording = useCallback((event?: PointerEvent<HTMLButtonElement>) => {
+    if (event && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
     }
-    continuousAnalysisRef.current = false;
-    setContinuousAnalyzing(false);
-  }, [analyze, running, source, startCamera]);
+    if (!holdRecordingRef.current.active) {
+      return;
+    }
+    holdRecordingRef.current.stopRequested = true;
+    setStatus("recording stopped - preparing cloud request");
+  }, []);
 
   const recordOrAnalyze = useCallback(async () => {
     if (source === "camera") {
-      await startContinuousAnalysis();
+      if (!running) {
+        await startCamera();
+      }
       return;
     }
     await analyze();
-  }, [analyze, source, startContinuousAnalysis]);
+  }, [analyze, running, source, startCamera]);
 
   const reset = useCallback(() => {
-    continuousAnalysisRef.current = false;
-    setContinuousAnalyzing(false);
+    holdRecordingRef.current.active = false;
+    holdRecordingRef.current.stopRequested = true;
+    setHoldRecording(false);
     setError(null);
     setAnalysis(null);
     setLastFrames([]);
@@ -796,31 +865,22 @@ export function IndustrialVideoAnalyzer({
   }, []);
 
   const remaining = Math.max(0, DEMO_ANALYSIS_LIMIT - analysesUsed);
-  const triggeredAlerts = analysis?.alerts.filter((alert) => alert.triggered).length ?? 0;
-  const primaryAlert = triggeredAlerts ? `${triggeredAlerts} alert${triggeredAlerts === 1 ? "" : "s"}` : analysis ? "clear" : "waiting";
-  const cloudFrameCount = analysis ? String(analysis.edgeAssessment.framesAnalyzed) : analyzing && status.startsWith("sending") ? "sending" : "0";
-  const estimatedCost = analysis ? formatCost(analysis.usage.estimatedCostUsd) : "--";
   const isCloudSending = analyzing && status.startsWith("sending");
-  const captureWindowSeconds = Math.round(CAMERA_CAPTURE_WINDOW_MS / 1000);
   const isLiveSource = source === "camera";
-  const isRecordingLocal = analyzing && !isCloudSending && isLiveSource;
+  const isRecordingLocal = holdRecording && !isCloudSending && isLiveSource;
   const providerLabel = PROVIDER_COPY[provider].label;
   const sourceCaptureDetail = isLiveSource
-    ? `Live camera: capture a ${captureWindowSeconds}s local burst, sample up to ${MAX_FRAMES} frames, then send selected JPEGs.`
+    ? `Live camera: hold Record, sample up to ${MAX_FRAMES} selected frames locally, then send one cloud request on release.`
     : `Uploaded/demo video: sample up to ${MAX_FRAMES} keyframes across the full clip duration, then send selected JPEGs.`;
   const analyzeLabel = isLiveSource
-    ? continuousAnalyzing
-      ? "Live analysis running"
-      : running
-        ? `Start live analysis`
-        : `Start camera + live analysis`
+    ? "Hold to record"
     : `Ask ${providerLabel} about this clip`;
   const cameraFacingLabel = cameraFacing === "environment" ? "Back camera" : "Front camera";
   const cameraCaptureState = isCloudSending
     ? "Sending sampled frames to cloud"
     : analyzing
       ? isLiveSource
-        ? `Capturing local ${captureWindowSeconds}s burst - not uploaded yet`
+        ? `Recording while held - release to analyze`
         : `Sampling full clip locally - not uploaded yet`
       : running
         ? `Preview only - ${cameraFacingLabel} - no recording`
@@ -829,12 +889,11 @@ export function IndustrialVideoAnalyzer({
           : source === "file"
             ? "Local file loaded - no cloud call"
             : "Sample clip loaded - no cloud call";
-  const cloudState = isCloudSending ? "Cloud analyzing" : analyzing ? "Local preprocessing" : analysis ? "Cloud response" : "Local only";
   const videoHint = isCloudSending
     ? "Cloud request running. Hold this view until the response returns."
     : analyzing
       ? isLiveSource
-        ? `Capturing a local ${captureWindowSeconds}s burst. Keep pointing at the scene.`
+        ? `Recording locally. Release the button to send one analysis.`
         : `Sampling keyframes across the clip. Full video stays local.`
       : analysis
         ? "Cloud response received. Adjust the prompt or scene, then analyze again."
@@ -843,39 +902,33 @@ export function IndustrialVideoAnalyzer({
     ? isCloudSending
       ? `Analyzing with ${providerLabel}...`
       : isLiveSource
-        ? `Recording ${captureWindowSeconds}s...`
+        ? "Recording... release to analyze"
         : "Sampling frames..."
     : analyzeLabel;
-  const videoProcessingTitle = continuousAnalyzing
-    ? isCloudSending
-      ? "Cloud reasoning on latest burst"
-      : analyzing
-        ? `Recording ${captureWindowSeconds}s live burst`
-        : "Live loop monitoring"
-    : isCloudSending
+  const videoProcessingTitle = isCloudSending
       ? "Cloud reasoning"
       : analyzing
         ? isLiveSource
-          ? `Recording ${captureWindowSeconds}s burst`
+          ? "Recording locally"
           : "Sampling keyframes"
         : analysis
           ? "Latest result ready"
           : running
             ? "Camera preview"
             : "Ready";
-  const videoProcessingDetail = continuousAnalyzing
-    ? "New bursts continue until Stop is pressed."
-    : isCloudSending
+  const videoProcessingDetail = isCloudSending
       ? "Selected JPEG frames are being analyzed."
       : analyzing
-        ? "Keep the scene steady while the browser samples frames."
+        ? isLiveSource
+          ? "Release the record button to send one cloud request."
+          : "Keep the scene steady while the browser samples frames."
         : analysis
           ? "Result card has the latest scene output."
           : "Press the red button to begin.";
   const quickPresets = OBJECTIVE_PRESETS.slice(0, 6);
-  const edgeRuntime = summarizeEdgeRuntime(lastFrames);
-  const primaryAction = analysis?.recommendations[0];
-  const objectChips = edgeRuntime.detections.length ? edgeRuntime.detections : fallbackObjectChips(analysis);
+  const localObjectChips = summarizeEdgeDetections(lastFrames);
+  const actionPreview = analysis?.recommendations.slice(0, 3) ?? [];
+  const objectChips = analysis?.objects.length ? fallbackObjectChips(analysis) : localObjectChips;
   const resultStatus = analysis ? "Scene result" : analyzing ? "Analyzing scene" : "Ready for scene result";
 
   return (
@@ -884,11 +937,11 @@ export function IndustrialVideoAnalyzer({
         <div>
           <p className="eyebrow">Cloud video analytics API showcase</p>
           <h1>Ask Gemini/OpenAI anything about live video.</h1>
-          <p className="app-subtitle">Point the camera, upload a clip, or run a sample. The browser samples keyframes locally, then sends only selected JPEG frames for a practical answer, evidence, cost, and next actions.</p>
+          <p className="app-subtitle">Point the camera, upload a clip, or run a sample. Safari, Edge, Chrome, and desktop uploads use local canvas frame sampling; cloud models return objects, evidence, cost, and next actions.</p>
         </div>
         <div className="loop">
           <span>video</span>
-          <span>browser edge sampler</span>
+          <span>browser frame sampler</span>
           <span>plain-language objective</span>
           <span>Gemini/OpenAI Vision/Cosmos</span>
           <span>alert API</span>
@@ -954,7 +1007,26 @@ export function IndustrialVideoAnalyzer({
                 <strong>{analysis ? `${Math.round(analysis.confidence)}% confidence` : analyzing ? "Working..." : "No cloud call yet"}</strong>
               </div>
               <h2>{analysis?.headline ?? "Point camera, record, get the answer here"}</h2>
-              <p>{analysis?.commentary ?? "The main result will appear in this card: what is happening, confidence, edge detections, cost, and the next action."}</p>
+              <p>{analysis?.commentary ?? "Hold the red record button, point at the scene, release, and the answer appears here. No background polling."}</p>
+              <div className={`priority-actions-panel ${actionPreview.length ? "ready" : ""}`} aria-label="Recommended actions">
+                <div className="priority-actions-heading">
+                  <span>Recommended actions</span>
+                  <strong>{actionPreview.length ? `${actionPreview.length} next step${actionPreview.length === 1 ? "" : "s"}` : "Waiting for analysis"}</strong>
+                </div>
+                {actionPreview.length ? (
+                  <div className="priority-action-list">
+                    {actionPreview.map((action) => (
+                      <div className="priority-action-item" key={`${action.priority}-${action.action}`}>
+                        <span>P{action.priority} / {action.owner}</span>
+                        <strong>{action.action}</strong>
+                        <p>{action.reason}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p>Actions will appear here first: what to do, who should do it, and why the video evidence supports it.</p>
+                )}
+              </div>
               <div className="scene-result-metrics">
                 <div>
                   <span>Frames</span>
@@ -969,65 +1041,97 @@ export function IndustrialVideoAnalyzer({
                   <strong>{analysis ? formatCost(analysis.usage.estimatedCostUsd) : "$0.0000"}</strong>
                 </div>
               </div>
-              <div className="ai-pipeline-row" aria-label="Video analytics architecture">
-                <div>
-                  <span>1 Edge perception</span>
-                  <strong>Frame scoring + objects</strong>
-                </div>
-                <div>
-                  <span>2 Cloud reasoner</span>
-                  <strong>{analysis ? analysis.provider : providerLabel}</strong>
-                </div>
-                <div>
-                  <span>3 Output API</span>
-                  <strong>Scene + action</strong>
-                </div>
-              </div>
-              {analysis ? (
-                <div className="scene-summary-block">
-                  <span>Scene</span>
-                  <strong>{analysis.scene.summary}</strong>
-                </div>
-              ) : null}
-              <div className="edge-model-strip">
-                <div>
-                  <span>Free edge model</span>
-                  <strong>MediaPipe EfficientDet Lite</strong>
-                </div>
-                <div>
-                  <span>WebGPU / Gemma-class slot</span>
-                  <strong>{hasWebGpu ? "Browser ready" : "Not available"}</strong>
-                </div>
-              </div>
-              <div className="edge-signal-row">
-                  <span>Edge quality {lastFrames.length ? `${edgeRuntime.quality}%` : "--"}</span>
-                  <span>Light {lastFrames.length ? `${edgeRuntime.brightness}%` : "--"}</span>
-                  <span>Sharp {lastFrames.length ? `${edgeRuntime.sharpness}%` : "--"}</span>
-                  <span>Stable {lastFrames.length ? `${edgeRuntime.stability}%` : "--"}</span>
-                  <span>Usable {lastFrames.length ? `${edgeRuntime.usableFrames}/${lastFrames.length}` : "--"}</span>
-                </div>
-                <div className="object-chip-row">
+              <div className="object-chip-row detected-object-row" aria-label="Detected objects">
+                <strong>Detected objects</strong>
                 {objectChips.map((object) => (
                   <span key={`${object.label}-${object.count}`}>
                     {object.label} {object.count > 1 ? `x${object.count}` : ""} {object.score ? `${Math.round(object.score * 100)}%` : ""}
                   </span>
                 ))}
-                {!objectChips.length ? <span>No edge objects yet</span> : null}
+                {!objectChips.length ? <span>No objects captured yet</span> : null}
               </div>
-              {primaryAction ? (
-                <div className="next-action-card">
-                  <span>Next action</span>
-                  <strong>{primaryAction.action}</strong>
+              {analysis ? (
+                <div className="full-response-panel">
+                  <div className="response-section">
+                    <span>Full response</span>
+                    <strong>{analysis.scene.summary}</strong>
+                    <p>{analysis.scene.environment} {analysis.scene.activity}</p>
+                  </div>
+                  {analysis.objects.length ? (
+                    <div className="detected-object-grid">
+                      {analysis.objects.slice(0, 6).map((object) => (
+                        <div key={`${object.label}-${object.evidence}`}>
+                          <strong>{object.label} {object.count > 1 ? `x${object.count}` : ""}</strong>
+                          <span>{object.locations.join(", ")}</span>
+                          <p>{object.evidence}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  {analysis.alerts.length ? (
+                    <div className="response-section compact-response-list">
+                      <span>Alerts</span>
+                      {analysis.alerts.slice(0, 3).map((alert) => (
+                        <p key={`${alert.label}-${alert.zoneId ?? "global"}`}>
+                          <strong>{alert.triggered ? "Triggered" : "Not triggered"}:</strong> {alert.label} - {alert.evidence}
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
+                  {analysis.timeline.length ? (
+                    <div className="response-section compact-response-list">
+                      <span>Timeline</span>
+                      {analysis.timeline.slice(0, 4).map((item) => (
+                        <p key={`${item.frame}-${item.observation}`}>
+                          <strong>Frame {item.frame}:</strong> {item.observation}
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>
 
             <label className="main-objective-box">
-              <span>Plain-language question for Gemini</span>
+              <span>Plain-language analytics question</span>
               <textarea onChange={(event) => setObjective(event.target.value)} placeholder={DEFAULT_OBJECTIVE} value={objective} />
             </label>
 
-            <button className={`analyze-button first-fold-analyze ${isRecordingLocal ? "recording" : ""}`} disabled={analyzing || continuousAnalyzing} onClick={() => void recordOrAnalyze()} type="button">
+            <button
+              aria-pressed={holdRecording}
+              className={`analyze-button first-fold-analyze ${isRecordingLocal ? "recording" : ""}`}
+              disabled={source === "camera" ? isCloudSending : analyzing}
+              onClick={(event) => {
+                if (source === "camera") {
+                  event.preventDefault();
+                  return;
+                }
+                void recordOrAnalyze();
+              }}
+              onPointerCancel={(event) => {
+                if (source === "camera") {
+                  finishHoldRecording(event);
+                }
+              }}
+              onPointerDown={(event) => {
+                if (source === "camera") {
+                  event.preventDefault();
+                  void beginHoldRecording(event);
+                }
+              }}
+              onPointerLeave={(event) => {
+                if (source === "camera" && holdRecordingRef.current.pointerId === event.pointerId) {
+                  finishHoldRecording(event);
+                }
+              }}
+              onPointerUp={(event) => {
+                if (source === "camera") {
+                  event.preventDefault();
+                  finishHoldRecording(event);
+                }
+              }}
+              type="button"
+            >
               <span className="record-dot" /> {analyzeButtonText}
             </button>
 
@@ -1056,7 +1160,7 @@ export function IndustrialVideoAnalyzer({
               </button>
               <label className={`upload-card compact ${source === "file" ? "active" : ""}`}>
                 <FileVideo size={16} />
-                <span>Upload</span>
+                <span>Upload clip</span>
                 <input
                   accept="video/*"
                   onChange={(event) => {
@@ -1068,9 +1172,9 @@ export function IndustrialVideoAnalyzer({
                   type="file"
                 />
               </label>
-              <button disabled={!running && !continuousAnalyzing} onClick={stopCamera} type="button">
+              <button disabled={!running && !holdRecording} onClick={stopCamera} type="button">
                 <Pause size={16} />
-                <span>{continuousAnalyzing ? "Stop live" : "Stop"}</span>
+                <span>{holdRecording ? "Cancel" : "Stop"}</span>
               </button>
             </div>
 
@@ -1092,27 +1196,9 @@ export function IndustrialVideoAnalyzer({
             </div>
           </div>
 
-          <div className="video-insights-row" aria-label="Current analysis status">
-            <div>
-              <span>Cloud state</span>
-              <strong>{cloudState}</strong>
-            </div>
-            <div>
-              <span>Frames to cloud</span>
-              <strong>{cloudFrameCount}</strong>
-            </div>
-            <div>
-              <span>Alert state</span>
-              <strong>{primaryAlert}</strong>
-            </div>
-            <div>
-              <span>Est. cost</span>
-              <strong>{estimatedCost}</strong>
-            </div>
-          </div>
-
           <p className="panel-note">
-            Hold the camera on the scene until the response appears. Full video stays in the browser; only selected JPEG keyframes and edge signals are sent. Cost is estimated from provider token usage.
+            Camera mode sends one request after you release the record button. Full video stays in the browser; only selected JPEG keyframes are sent.
+            Upload mode works without camera access on Safari, Edge, Chrome, and desktop browsers that support video canvas extraction.
           </p>
         </div>
 
@@ -1212,91 +1298,13 @@ export function IndustrialVideoAnalyzer({
             </div>
           </details>
 
-          {error ? (
+          {error && !analysis ? (
             <div className="inline-error">
               <AlertTriangle size={18} />
               <p>{error}</p>
             </div>
           ) : null}
         </aside>
-      </section>
-
-      <section className="result-grid">
-        <div className="panel result-hero">
-          <div className="panel-heading">
-            <h2>{analysis?.headline ?? "Detailed video answer"}</h2>
-            <span>{analysis ? `${analysis.provider} / ${analysis.model}` : modeLabel(mode)}</span>
-          </div>
-          <p className="summary">
-            {analysis?.commentary ??
-              "Run a clip to get scene understanding, timeline evidence, safety or operations notes when relevant, and recommended human or robotic actions."}
-          </p>
-          {analysis ? (
-            <div className="metric-grid">
-              <div className="metric">
-                <span>Confidence</span>
-                <strong>{Math.round(analysis.confidence)}</strong>
-              </div>
-              <div className="metric">
-                <span>Latency</span>
-                <strong>{analysis.usage.latencyMs}ms</strong>
-              </div>
-            </div>
-          ) : null}
-        </div>
-
-        <div className="panel">
-          <div className="panel-heading">
-            <h2>Alerts</h2>
-            <ShieldCheck size={17} />
-          </div>
-          <div className="alert-list">
-            {(analysis?.alerts ?? []).length ? (
-              analysis?.alerts.map((alert) => (
-                <div className={`alert-card ${alert.triggered ? "triggered" : ""}`} key={`${alert.label}-${alert.zoneId ?? "global"}`}>
-                  <strong>{alert.label}</strong>
-                  <span>{alert.triggered ? "Triggered" : "Not triggered"} / {alert.severity}</span>
-                  <p>{alert.evidence}</p>
-                </div>
-              ))
-            ) : (
-              <p className="empty">No alerts yet.</p>
-            )}
-          </div>
-        </div>
-
-        <div className="panel">
-          <div className="panel-heading">
-            <h2>Timeline evidence</h2>
-            <Radar size={17} />
-          </div>
-          <div className="commentary-list">
-            {(analysis?.timeline ?? []).map((item) => (
-              <div className="commentary-item" key={`${item.frame}-${item.observation}`}>
-                <time>Frame {item.frame}</time>
-                <p>{item.observation}</p>
-              </div>
-            ))}
-            {!analysis?.timeline.length ? <p className="empty">Sampled-frame observations appear here.</p> : null}
-          </div>
-        </div>
-
-        <div className="panel">
-          <div className="panel-heading">
-            <h2>Actions</h2>
-            <span>{analysis?.edgeAssessment.costControl ?? "browser edge preprocessing"}</span>
-          </div>
-          <div className="action-list">
-            {(analysis?.recommendations ?? []).map((action) => (
-              <div className="action-item" key={`${action.priority}-${action.action}`}>
-                <span>P{action.priority} / {action.owner}</span>
-                <strong>{action.action}</strong>
-                <p>{action.reason}</p>
-              </div>
-            ))}
-            {!analysis?.recommendations.length ? <p className="empty">Recommended human, automation, or robot actions appear here.</p> : null}
-          </div>
-        </div>
       </section>
     </main>
   );

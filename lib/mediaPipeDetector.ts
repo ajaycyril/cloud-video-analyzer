@@ -34,9 +34,21 @@ export async function createObjectDetector(): Promise<ObjectDetector> {
         scoreThreshold: MIN_DETECTION_SCORE,
         maxResults: MAX_DETECTIONS,
       });
-    })();
+    })().catch((error) => {
+      detectorPromise = null;
+      throw error;
+    });
   }
   return detectorPromise;
+}
+
+export async function tryCreateObjectDetector(): Promise<boolean> {
+  try {
+    await createObjectDetector();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function mapDetections(result: ObjectDetectorResult, video: HTMLVideoElement): LocalDetection[] {

@@ -14,7 +14,7 @@ import { VerificationPanel } from "./VerificationPanel";
 import { WorldStatePanel } from "./WorldStatePanel";
 import { buildVideoConstraints, listVideoInputDevices, stopStream } from "@/lib/camera";
 import { canvasToJpegDataUrl, captureVideoFrame, computeEdgeMetrics, type EdgeMetricResult } from "@/lib/edgeMetrics";
-import { createObjectDetector, detectObjectsForVideo } from "@/lib/mediaPipeDetector";
+import { detectObjectsForVideo, tryCreateObjectDetector } from "@/lib/mediaPipeDetector";
 import type { AnalysisResponse, AppMode, EdgeMetrics, LocalDetection, ScanPhase } from "@/lib/types";
 
 type ApiError = {
@@ -117,7 +117,7 @@ export function CameraScanner({ hasGeminiKey }: { hasGeminiKey: boolean }) {
     setError(null);
     setStatus("starting camera");
     try {
-      await createObjectDetector();
+      await tryCreateObjectDetector();
       stopStream(streamRef.current);
       const stream = await navigator.mediaDevices.getUserMedia(buildVideoConstraints(mode, selectedDeviceId));
       streamRef.current = stream;

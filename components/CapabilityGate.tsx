@@ -11,7 +11,7 @@ export function CapabilityGate({ result, children }: { result: CapabilityResult 
         <div className="status-card">
           <Cpu />
           <h1>Checking browser capabilities</h1>
-          <p>Cloud Video Analyzer is validating camera, WebAssembly, canvas, and WebGPU capability.</p>
+          <p>Cloud Video Analyzer is validating video, canvas frame extraction, and optional camera/object-hint support.</p>
         </div>
       </main>
     );
@@ -22,15 +22,14 @@ export function CapabilityGate({ result, children }: { result: CapabilityResult 
       <main className="center-screen">
         <div className="status-card error">
           <ShieldAlert />
-          <h1>Browser AI requirements missing</h1>
-          <p>Use HTTPS with camera, WebAssembly, and canvas support. Chrome is preferred for WebGPU; Edge and iPhone Safari work when the required APIs are available.</p>
+          <h1>Video frame extraction is unavailable</h1>
+          <p>This app needs canvas frame extraction to analyze camera, uploaded clips, or demo videos. Camera and local object hints are optional.</p>
           <div className="requirements-grid">
             <Requirement label="Browser" ok value={result.browserName} />
-            <Requirement label="Secure context" ok={result.isSecureContext} value={result.isSecureContext ? "Ready" : "Missing"} />
-            <Requirement label="Camera API" ok={result.hasMediaDevices} value={result.hasMediaDevices ? "Ready" : "Missing"} />
-            <Requirement label="WebAssembly" ok={result.hasWebAssembly} value={result.hasWebAssembly ? "Ready" : "Missing"} />
             <Requirement label="Canvas ImageData" ok={result.hasCanvasImageData} value={result.hasCanvasImageData ? "Ready" : "Missing"} />
-            <Requirement label="WebGPU" ok={result.hasWebGPU} optional value={result.hasWebGPU ? "Ready" : "Optional"} />
+            <Requirement label="Camera API" ok={result.hasMediaDevices} optional value={result.hasMediaDevices ? "Ready" : "Upload-only"} />
+            <Requirement label="WebAssembly" ok={result.hasWebAssembly} optional value={result.hasWebAssembly ? "Object hints ready" : "Cloud-only"} />
+            <Requirement label="Secure context" ok={result.isSecureContext} optional value={result.isSecureContext ? "Ready" : "Upload-only"} />
           </div>
           <ul className="blocking-list">
             {result.issues.map((issue) => (
@@ -47,8 +46,14 @@ export function CapabilityGate({ result, children }: { result: CapabilityResult 
       <div className="capability-pill">
         <Cpu size={14} />
         <span>{result.browserName}</span>
-        <span>{result.hasWebGPU ? "WebGPU ready" : "CPU/WASM mode"}</span>
+        <span>{result.hasMediaDevices ? "camera ready" : "upload ready"}</span>
+        <span>{result.hasWebAssembly ? "local object hints" : "cloud-only objects"}</span>
       </div>
+      {result.warnings.length ? (
+        <div className="compatibility-warning" role="status">
+          {result.warnings[0]}
+        </div>
+      ) : null}
       {children}
     </>
   );

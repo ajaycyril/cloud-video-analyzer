@@ -28,4 +28,5 @@ export type CapabilityResult = {
   hasCanvasImageData: boolean;
   hasWebGPU: boolean;
   issues: string[];
+  warnings: string[];
 };
