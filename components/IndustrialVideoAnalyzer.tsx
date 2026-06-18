@@ -404,7 +404,16 @@ export function IndustrialVideoAnalyzer({
     try {
       clearVideoObjectUrl();
       stopStream(streamRef.current);
-      const stream = await navigator.mediaDevices.getUserMedia(buildVideoConstraints("webcam_coach", deviceId, nextFacing));
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(buildVideoConstraints("webcam_coach", deviceId, nextFacing));
+      } catch (cameraError) {
+        if (!deviceId) {
+          throw cameraError;
+        }
+        setSelectedDeviceId(null);
+        stream = await navigator.mediaDevices.getUserMedia(buildVideoConstraints("webcam_coach", null, nextFacing));
+      }
       streamRef.current = stream;
       if (!videoRef.current) {
         throw new Error("Video element is not ready.");
@@ -878,7 +887,7 @@ export function IndustrialVideoAnalyzer({
     try {
       if (source !== "camera" || !running) {
         setLiveStatus(`starting ${cameraFacing === "environment" ? "back" : "front"} camera for Live`);
-        await startCamera();
+        await startCamera(cameraFacing, null);
       }
       const video = videoRef.current;
       if (!video) {
@@ -905,18 +914,8 @@ export function IndustrialVideoAnalyzer({
         liveStartedAtRef.current = performance.now();
         websocket.send(
           JSON.stringify({
-            clientContent: {
-              turns: [
-                {
-                  role: "user",
-                  parts: [
-                    {
-                      text: `Act as a continuous live camera video analytics commentator. Objective: ${objective}. Watch the incoming JPEG frames until Stop Live is pressed. Respond whenever visible evidence changes with concise scene observations, detected objects, alerts, and recommended actions. Zones: ${zones.map((zone) => `${zone.id} ${zone.label}`).join(", ") || "none"}.`,
-                    },
-                  ],
-                },
-              ],
-              turnComplete: false,
+            realtimeInput: {
+              text: `Act as a continuous live camera video analytics commentator. Objective: ${objective}. Watch the incoming JPEG frames until Stop Live is pressed. Respond whenever visible evidence changes with concise scene observations, detected objects, alerts, and recommended actions. Zones: ${zones.map((zone) => `${zone.id} ${zone.label}`).join(", ") || "none"}.`,
             },
           }),
         );
@@ -935,18 +934,20 @@ export function IndustrialVideoAnalyzer({
             websocket.send(
               JSON.stringify({
                 realtimeInput: {
-                  mediaChunks: [
-                    {
-                      mimeType: "image/jpeg",
-                      data: frame.imageDataUrl.slice(frame.imageDataUrl.indexOf(",") + 1),
-                    },
-                  ],
+                  video: {
+                    data: frame.imageDataUrl.slice(frame.imageDataUrl.indexOf(",") + 1),
+                    mimeType: "image/jpeg",
+                  },
                 },
               }),
             );
             setLastFrames((frames) => [...frames, frame].slice(-MAX_FRAMES));
             setLiveFrameCount((count) => count + 1);
             setLiveEvents((items) => addRecent(items, `sent frame ${new Date().toLocaleTimeString([], { minute: "2-digit", second: "2-digit" })}`, 4));
+            if (frame.localDetections.length) {
+              const labels = frame.localDetections.slice(0, 3).map((detection) => detection.label).join(", ");
+              setLiveTranscript((items) => addRecent(items, `Local live frame: ${labels} visible. Waiting for Gemini commentary.`));
+            }
           }
         };
 
