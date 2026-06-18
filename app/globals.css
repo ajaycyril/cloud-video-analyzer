@@ -929,6 +929,49 @@ h3 {
   text-transform: uppercase;
 }
 
+.video-processing-badge {
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(16, 32, 25, 0.12);
+  border-radius: 14px;
+  box-shadow: 0 12px 34px rgba(16, 32, 25, 0.18);
+  display: grid;
+  gap: 3px;
+  left: 12px;
+  max-width: min(380px, calc(100% - 24px));
+  padding: 9px 10px;
+  position: absolute;
+  top: 12px;
+  z-index: 4;
+}
+
+.video-processing-badge strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.15;
+}
+
+.video-processing-badge span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.video-processing-badge.active {
+  border-color: rgba(183, 121, 0, 0.42);
+}
+
+.video-processing-badge.active strong {
+  color: var(--yellow);
+}
+
+.video-processing-badge.ready {
+  border-color: rgba(17, 131, 75, 0.34);
+}
+
+.video-processing-badge.ready strong {
+  color: var(--green);
+}
+
 .drawn-zone {
   background: rgba(255, 214, 102, 0.22);
   border: 2px solid var(--yellow);
@@ -1251,6 +1294,7 @@ h3 {
 
 .scene-result-topline,
 .scene-result-metrics,
+.ai-pipeline-row,
 .edge-model-strip,
 .edge-signal-row,
 .object-chip-row {
@@ -1307,7 +1351,13 @@ h3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.ai-pipeline-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .scene-result-metrics div,
+.ai-pipeline-row div,
 .edge-model-strip div {
   background: rgba(238, 244, 241, 0.78);
   border: 1px solid rgba(16, 32, 25, 0.07);
@@ -1317,12 +1367,23 @@ h3 {
 }
 
 .scene-result-metrics strong,
+.ai-pipeline-row strong,
 .edge-model-strip strong {
   display: block;
   font-size: 14px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ai-pipeline-row span {
+  color: var(--green);
+  display: block;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+  text-transform: uppercase;
 }
 
 .scene-summary-block,
@@ -2426,18 +2487,25 @@ h3 {
   }
 
   .scene-result-metrics,
+  .ai-pipeline-row,
   .edge-model-strip {
     gap: 4px;
   }
 
   .scene-result-metrics div,
+  .ai-pipeline-row div,
   .edge-model-strip div {
     padding: 6px;
   }
 
   .scene-result-metrics strong,
+  .ai-pipeline-row strong,
   .edge-model-strip strong {
     font-size: 11px;
+  }
+
+  .ai-pipeline-row span {
+    font-size: 8px;
   }
 
   .edge-signal-row {
@@ -2470,6 +2538,21 @@ h3 {
 
   .analysis-annotation-overlay strong {
     font-size: 12px;
+  }
+
+  .video-processing-badge {
+    left: 10px;
+    max-width: calc(100% - 20px);
+    padding: 7px 8px;
+    top: 10px;
+  }
+
+  .video-processing-badge strong {
+    font-size: 12px;
+  }
+
+  .video-processing-badge span {
+    font-size: 10px;
   }
 
   .video-insights-row {

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent } from "rea
 import { buildVideoConstraints, listVideoInputDevices, stopStream, type CameraFacing } from "@/lib/camera";
 import { canvasToJpegDataUrl, captureVideoFrame, computeEdgeMetrics, type EdgeMetricResult } from "@/lib/edgeMetrics";
 import { createObjectDetector, detectObjectsForVideo } from "@/lib/mediaPipeDetector";
+import { fallbackObjectChips, summarizeEdgeRuntime } from "@/lib/resultPresentation";
 import type { LocalDetection } from "@/lib/types";
 import type { ProviderId, SampledFrame, VideoAnalysisResponse, VideoMode, VideoSource, Zone } from "@/lib/videoSchema";
 
@@ -121,30 +122,6 @@ function payloadBytes(frames: SampledFrame[]): number {
   return frames.reduce((total, frame) => total + frame.imageDataUrl.length, 0);
 }
 
-function average(values: number[]): number {
-  if (values.length === 0) {
-    return 0;
-  }
-  return values.reduce((total, value) => total + value, 0) / values.length;
-}
-
-function summarizeEdgeDetections(frames: SampledFrame[]): Array<{ label: string; count: number; score: number }> {
-  const byLabel = new Map<string, { label: string; count: number; score: number }>();
-  for (const detection of frames.flatMap((frame) => frame.localDetections)) {
-    const key = detection.label.toLowerCase();
-    const current = byLabel.get(key);
-    if (current) {
-      current.count += 1;
-      current.score = Math.max(current.score, detection.score);
-    } else {
-      byLabel.set(key, { label: detection.label, count: 1, score: detection.score });
-    }
-  }
-  return Array.from(byLabel.values())
-    .sort((left, right) => right.score - left.score)
-    .slice(0, 5);
-}
-
 function waitForVideoData(video: HTMLVideoElement): Promise<void> {
   if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
     return Promise.resolve();
@@ -213,6 +190,8 @@ export function IndustrialVideoAnalyzer({
   const liveTimerRef = useRef<number | null>(null);
   const previousFrameRef = useRef<EdgeMetricResult["snapshot"] | null>(null);
   const zoneInteractionRef = useRef<ZoneInteraction | null>(null);
+  const continuousAnalysisRef = useRef(false);
+  const analysesUsedRef = useRef(0);
 
   const [provider, setProvider] = useState<ProviderId>(providerStatus.gemini ? "gemini" : providerStatus.openai ? "openai" : "nvidia");
   const [mode, setMode] = useState<VideoMode>("industrial_general");
@@ -226,6 +205,7 @@ export function IndustrialVideoAnalyzer({
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [continuousAnalyzing, setContinuousAnalyzing] = useState(false);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [cameraFacing, setCameraFacing] = useState<CameraFacing>("environment");
@@ -241,6 +221,7 @@ export function IndustrialVideoAnalyzer({
 
   useEffect(() => {
     return () => {
+      continuousAnalysisRef.current = false;
       if (liveTimerRef.current) {
         window.clearInterval(liveTimerRef.current);
       }
@@ -251,6 +232,10 @@ export function IndustrialVideoAnalyzer({
       }
     };
   }, []);
+
+  useEffect(() => {
+    analysesUsedRef.current = analysesUsed;
+  }, [analysesUsed]);
 
   const refreshDevices = useCallback(async () => {
     const nextDevices = await listVideoInputDevices();
@@ -274,6 +259,19 @@ export function IndustrialVideoAnalyzer({
     }
     setVideoOrientation(video.videoHeight > video.videoWidth ? "portrait-video" : "landscape-video");
   }, []);
+
+  const warmVideoElement = useCallback(async () => {
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+    video.preload = "auto";
+    video.load();
+    await video.play().catch(() => undefined);
+    await waitForVideoData(video).catch(() => undefined);
+    video.pause();
+    updateVideoOrientation();
+  }, [updateVideoOrientation]);
 
   const startCamera = useCallback(async (nextFacing: CameraFacing = cameraFacing, deviceId: string | null = selectedDeviceId) => {
     setError(null);
@@ -304,6 +302,8 @@ export function IndustrialVideoAnalyzer({
   }, [cameraFacing, clearVideoObjectUrl, refreshDevices, selectedDeviceId, updateVideoOrientation]);
 
   const stopCamera = useCallback(() => {
+    continuousAnalysisRef.current = false;
+    setContinuousAnalyzing(false);
     setRunning(false);
     setStatus("camera off - no recording");
     stopStream(streamRef.current);
@@ -341,12 +341,12 @@ export function IndustrialVideoAnalyzer({
         videoRef.current.src = objectUrl;
         videoRef.current.controls = true;
         videoRef.current.muted = true;
-        await videoRef.current.load();
+        await warmVideoElement();
       }
       setRunning(false);
       setStatus("local video ready");
     },
-    [clearVideoObjectUrl],
+    [clearVideoObjectUrl, warmVideoElement],
   );
 
   const loadSampleUrl = useCallback(async () => {
@@ -365,11 +365,11 @@ export function IndustrialVideoAnalyzer({
       videoRef.current.src = sampleUrl.trim();
       videoRef.current.controls = true;
       videoRef.current.muted = true;
-      videoRef.current.load();
+      await warmVideoElement();
     }
     setRunning(false);
     setStatus("sample url loaded; press play or analyze");
-  }, [clearVideoObjectUrl, sampleUrl]);
+  }, [clearVideoObjectUrl, sampleUrl, warmVideoElement]);
 
   const loadSampleClip = useCallback(
     async (clip: (typeof SAMPLE_CLIPS)[number]) => {
@@ -387,12 +387,12 @@ export function IndustrialVideoAnalyzer({
         videoRef.current.src = clip.url;
         videoRef.current.controls = true;
         videoRef.current.muted = true;
-        videoRef.current.load();
+        await warmVideoElement();
       }
       setRunning(false);
       setStatus(`${clip.label.toLowerCase()} sample ready`);
     },
-    [clearVideoObjectUrl],
+    [clearVideoObjectUrl, warmVideoElement],
   );
 
   const captureOneFrame = useCallback(async (timestampMs: number): Promise<SampledFrame | null> => {
@@ -487,19 +487,21 @@ export function IndustrialVideoAnalyzer({
     return frames;
   }, [captureOneFrame, seekVideo, source]);
 
-  const analyze = useCallback(async () => {
+  const analyze = useCallback(async ({ keepPreviousResult = false }: { keepPreviousResult?: boolean } = {}) => {
     if (!providerStatus[provider]) {
       setError(`${provider.toUpperCase()} API key is not configured on the server.`);
-      return;
+      return false;
     }
-    if (analysesUsed >= DEMO_ANALYSIS_LIMIT) {
+    if (analysesUsedRef.current >= DEMO_ANALYSIS_LIMIT) {
       setError("Demo analysis limit reached for this browser session.");
-      return;
+      return false;
     }
 
     setAnalyzing(true);
     setError(null);
-    setAnalysis(null);
+    if (!keepPreviousResult) {
+      setAnalysis(null);
+    }
     setStatus("extracting relevant frames in browser");
     try {
       const frames = await sampleFrames();
@@ -533,28 +535,62 @@ export function IndustrialVideoAnalyzer({
       }
 
       const nextAnalysis = payload as VideoAnalysisResponse;
-      const nextUsage = analysesUsed + 1;
+      const nextUsage = analysesUsedRef.current + 1;
+      analysesUsedRef.current = nextUsage;
       setAnalysesUsed(nextUsage);
       window.sessionStorage.setItem("cloud-video-analyzer-analyses-used", String(nextUsage));
       setAnalysis(nextAnalysis);
       setStatus(`${provider} analysis complete in ${nextAnalysis.usage.latencyMs}ms`);
+      return true;
     } catch (analysisError) {
       setError(readableError(analysisError));
       setStatus("analysis error");
+      return false;
     } finally {
       setAnalyzing(false);
     }
-  }, [analysesUsed, mode, objective, provider, providerStatus, sampleFrames, source, zones]);
+  }, [mode, objective, provider, providerStatus, sampleFrames, source, zones]);
 
-  const recordOrAnalyze = useCallback(async () => {
+  const startContinuousAnalysis = useCallback(async () => {
+    if (continuousAnalysisRef.current) {
+      return;
+    }
+    setError(null);
     if (source === "camera" && !running) {
       await startCamera();
       await new Promise((resolve) => window.setTimeout(resolve, 450));
     }
-    await analyze();
+    continuousAnalysisRef.current = true;
+    setContinuousAnalyzing(true);
+    setStatus("live analysis loop started");
+    while (continuousAnalysisRef.current && analysesUsedRef.current < DEMO_ANALYSIS_LIMIT) {
+      const ok = await analyze({ keepPreviousResult: true });
+      if (!ok) {
+        break;
+      }
+      if (continuousAnalysisRef.current) {
+        setStatus("live loop waiting for next burst");
+        await new Promise((resolve) => window.setTimeout(resolve, 650));
+      }
+    }
+    if (analysesUsedRef.current >= DEMO_ANALYSIS_LIMIT) {
+      setError("Demo analysis limit reached for this browser session.");
+    }
+    continuousAnalysisRef.current = false;
+    setContinuousAnalyzing(false);
   }, [analyze, running, source, startCamera]);
 
+  const recordOrAnalyze = useCallback(async () => {
+    if (source === "camera") {
+      await startContinuousAnalysis();
+      return;
+    }
+    await analyze();
+  }, [analyze, source, startContinuousAnalysis]);
+
   const reset = useCallback(() => {
+    continuousAnalysisRef.current = false;
+    setContinuousAnalyzing(false);
     setError(null);
     setAnalysis(null);
     setLastFrames([]);
@@ -563,6 +599,7 @@ export function IndustrialVideoAnalyzer({
   }, [cameraFacing, running]);
 
   const resetLimit = useCallback(() => {
+    analysesUsedRef.current = 0;
     setAnalysesUsed(0);
     window.sessionStorage.removeItem("cloud-video-analyzer-analyses-used");
     setError(null);
@@ -772,9 +809,11 @@ export function IndustrialVideoAnalyzer({
     ? `Live camera: capture a ${captureWindowSeconds}s local burst, sample up to ${MAX_FRAMES} frames, then send selected JPEGs.`
     : `Uploaded/demo video: sample up to ${MAX_FRAMES} keyframes across the full clip duration, then send selected JPEGs.`;
   const analyzeLabel = isLiveSource
-    ? running
-      ? `Record ${captureWindowSeconds}s + ask ${providerLabel}`
-      : `Start camera + record ${captureWindowSeconds}s`
+    ? continuousAnalyzing
+      ? "Live analysis running"
+      : running
+        ? `Start live analysis`
+        : `Start camera + live analysis`
     : `Ask ${providerLabel} about this clip`;
   const cameraFacingLabel = cameraFacing === "environment" ? "Back camera" : "Front camera";
   const cameraCaptureState = isCloudSending
@@ -807,14 +846,36 @@ export function IndustrialVideoAnalyzer({
         ? `Recording ${captureWindowSeconds}s...`
         : "Sampling frames..."
     : analyzeLabel;
+  const videoProcessingTitle = continuousAnalyzing
+    ? isCloudSending
+      ? "Cloud reasoning on latest burst"
+      : analyzing
+        ? `Recording ${captureWindowSeconds}s live burst`
+        : "Live loop monitoring"
+    : isCloudSending
+      ? "Cloud reasoning"
+      : analyzing
+        ? isLiveSource
+          ? `Recording ${captureWindowSeconds}s burst`
+          : "Sampling keyframes"
+        : analysis
+          ? "Latest result ready"
+          : running
+            ? "Camera preview"
+            : "Ready";
+  const videoProcessingDetail = continuousAnalyzing
+    ? "New bursts continue until Stop is pressed."
+    : isCloudSending
+      ? "Selected JPEG frames are being analyzed."
+      : analyzing
+        ? "Keep the scene steady while the browser samples frames."
+        : analysis
+          ? "Result card has the latest scene output."
+          : "Press the red button to begin.";
   const quickPresets = OBJECTIVE_PRESETS.slice(0, 6);
-  const edgeDetections = summarizeEdgeDetections(lastFrames);
-  const edgeBrightness = Math.round(average(lastFrames.map((frame) => frame.edgeMetrics.brightness)));
-  const edgeSharpness = Math.round(average(lastFrames.map((frame) => frame.edgeMetrics.sharpness)));
-  const edgeStability = Math.round(average(lastFrames.map((frame) => frame.edgeMetrics.stability)));
-  const edgeQuality = Math.round(average(lastFrames.map((frame) => (frame.edgeMetrics.brightness + frame.edgeMetrics.sharpness + frame.edgeMetrics.stability) / 3)));
+  const edgeRuntime = summarizeEdgeRuntime(lastFrames);
   const primaryAction = analysis?.recommendations[0];
-  const visibleObjects = analysis?.objects.slice(0, 4) ?? [];
+  const objectChips = edgeRuntime.detections.length ? edgeRuntime.detections : fallbackObjectChips(analysis);
   const resultStatus = analysis ? "Scene result" : analyzing ? "Analyzing scene" : "Ready for scene result";
 
   return (
@@ -844,12 +905,10 @@ export function IndustrialVideoAnalyzer({
             ref={videoFrameRef}
           >
             <video muted onLoadedMetadata={updateVideoOrientation} onResize={updateVideoOrientation} playsInline ref={videoRef} />
-            {analysis ? (
-              <div className="analysis-annotation-overlay" aria-label="Rendered AI annotations">
-                <strong>{analysis.headline}</strong>
-                <span>{analysis.alerts.some((alert) => alert.triggered) ? "Alert annotation" : "No alert annotation"}</span>
-              </div>
-            ) : null}
+            <div className={`video-processing-badge ${analyzing ? "active" : analysis ? "ready" : ""}`}>
+              <strong>{videoProcessingTitle}</strong>
+              <span>{videoProcessingDetail}</span>
+            </div>
             {zoneToolOpen ? zones.map((zone) => (
               <div
                 className="drawn-zone"
@@ -910,6 +969,20 @@ export function IndustrialVideoAnalyzer({
                   <strong>{analysis ? formatCost(analysis.usage.estimatedCostUsd) : "$0.0000"}</strong>
                 </div>
               </div>
+              <div className="ai-pipeline-row" aria-label="Video analytics architecture">
+                <div>
+                  <span>1 Edge perception</span>
+                  <strong>Frame scoring + objects</strong>
+                </div>
+                <div>
+                  <span>2 Cloud reasoner</span>
+                  <strong>{analysis ? analysis.provider : providerLabel}</strong>
+                </div>
+                <div>
+                  <span>3 Output API</span>
+                  <strong>Scene + action</strong>
+                </div>
+              </div>
               {analysis ? (
                 <div className="scene-summary-block">
                   <span>Scene</span>
@@ -927,18 +1000,19 @@ export function IndustrialVideoAnalyzer({
                 </div>
               </div>
               <div className="edge-signal-row">
-                <span>Edge quality {lastFrames.length ? `${edgeQuality}%` : "--"}</span>
-                <span>Light {lastFrames.length ? `${edgeBrightness}%` : "--"}</span>
-                <span>Sharp {lastFrames.length ? `${edgeSharpness}%` : "--"}</span>
-                <span>Stable {lastFrames.length ? `${edgeStability}%` : "--"}</span>
-              </div>
-              <div className="object-chip-row">
-                {(edgeDetections.length ? edgeDetections : visibleObjects.map((object) => ({ label: object.label, count: object.count, score: analysis?.confidence ? analysis.confidence / 100 : 0 }))).map((object) => (
+                  <span>Edge quality {lastFrames.length ? `${edgeRuntime.quality}%` : "--"}</span>
+                  <span>Light {lastFrames.length ? `${edgeRuntime.brightness}%` : "--"}</span>
+                  <span>Sharp {lastFrames.length ? `${edgeRuntime.sharpness}%` : "--"}</span>
+                  <span>Stable {lastFrames.length ? `${edgeRuntime.stability}%` : "--"}</span>
+                  <span>Usable {lastFrames.length ? `${edgeRuntime.usableFrames}/${lastFrames.length}` : "--"}</span>
+                </div>
+                <div className="object-chip-row">
+                {objectChips.map((object) => (
                   <span key={`${object.label}-${object.count}`}>
                     {object.label} {object.count > 1 ? `x${object.count}` : ""} {object.score ? `${Math.round(object.score * 100)}%` : ""}
                   </span>
                 ))}
-                {!edgeDetections.length && !visibleObjects.length ? <span>No edge objects yet</span> : null}
+                {!objectChips.length ? <span>No edge objects yet</span> : null}
               </div>
               {primaryAction ? (
                 <div className="next-action-card">
@@ -953,7 +1027,7 @@ export function IndustrialVideoAnalyzer({
               <textarea onChange={(event) => setObjective(event.target.value)} placeholder={DEFAULT_OBJECTIVE} value={objective} />
             </label>
 
-            <button className={`analyze-button first-fold-analyze ${isRecordingLocal ? "recording" : ""}`} disabled={analyzing} onClick={() => void recordOrAnalyze()} type="button">
+            <button className={`analyze-button first-fold-analyze ${isRecordingLocal ? "recording" : ""}`} disabled={analyzing || continuousAnalyzing} onClick={() => void recordOrAnalyze()} type="button">
               <span className="record-dot" /> {analyzeButtonText}
             </button>
 
@@ -994,9 +1068,9 @@ export function IndustrialVideoAnalyzer({
                   type="file"
                 />
               </label>
-              <button disabled={!running} onClick={stopCamera} type="button">
+              <button disabled={!running && !continuousAnalyzing} onClick={stopCamera} type="button">
                 <Pause size={16} />
-                <span>Stop</span>
+                <span>{continuousAnalyzing ? "Stop live" : "Stop"}</span>
               </button>
             </div>
 
