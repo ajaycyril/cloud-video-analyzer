@@ -8,8 +8,9 @@ Cloud Video Analyzer is organized around a provider-neutral video analytics cont
 camera/file/sample video
   -> browser keyframe sampler
   -> edge quality + motion metrics
-  -> optional local object detections
-  -> optional Roboflow specialist detections
+  -> local object detections
+  -> object/motion edge gate
+  -> optional Roboflow specialist detections on selected frames
   -> plain-language objective + zones
   -> /api/analyze-video
   -> Gemini / OpenAI Vision / NVIDIA Cosmos adapter
@@ -23,10 +24,11 @@ The browser reduces cloud cost and latency before any API call:
 - Samples up to five frames per request in the browser.
 - Compresses frames as JPEG.
 - Computes brightness, contrast, sharpness, edge density, motion, stability, and visual complexity.
-- Runs local object detection when the model asset is available.
-- Optionally enriches sampled frames through Roboflow hosted object detection when `ROBOFLOW_API_KEY` or `ROBOFLOW_INFERENCE_API_KEY` plus `ROBOFLOW_MODEL` are configured.
+- Runs local object detection with a bundled EfficientDet Lite model when browser support is available.
+- Applies an object/motion gate before any cloud reasoning request; static frames without local objects or motion are skipped.
+- Optionally enriches only edge-selected frames through Roboflow hosted object detection when `ROBOFLOW_API_KEY` or `ROBOFLOW_INFERENCE_API_KEY` plus `ROBOFLOW_MODEL` are configured.
 - Sends drawn zones as normalized coordinates.
-- The API caps cloud calls to the best three sampled frames by local quality score.
+- The API caps cloud reasoning calls to the best three object/motion-triggered frames.
 
 ## Provider Contract
 

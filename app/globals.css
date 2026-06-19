@@ -2257,6 +2257,42 @@ h3 {
   border-color: rgba(17, 131, 75, 0.34);
 }
 
+.force-cloud-toggle {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgba(16, 32, 25, 0.08);
+  border-radius: 12px;
+  cursor: pointer;
+  display: flex;
+  gap: 9px;
+  padding: 8px 10px;
+}
+
+.force-cloud-toggle input {
+  accent-color: var(--green);
+  flex: 0 0 auto;
+  height: 16px;
+  width: 16px;
+}
+
+.force-cloud-toggle span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.force-cloud-toggle strong {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.force-cloud-toggle small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
 .sample-strip {
   display: flex;
   gap: 6px;
@@ -2993,6 +3029,18 @@ h3 {
   }
 
   .capture-disclosure {
+    display: none;
+  }
+
+  .force-cloud-toggle {
+    padding: 6px 8px;
+  }
+
+  .force-cloud-toggle strong {
+    font-size: 11px;
+  }
+
+  .force-cloud-toggle small {
     display: none;
   }
 

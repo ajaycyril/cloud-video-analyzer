@@ -56,6 +56,9 @@ export function buildVideoAnalysisPrompt(request: VideoAnalysisRequest): string 
       : `Drawn zones in normalized image coordinates: ${zoneSummary}. Ignore zones unless the user explicitly asks for zone or boundary behavior.`,
     `The browser sent ${request.frames.length} keyframes instead of raw high-FPS video to reduce latency and cloud cost.`,
     `Sampling: target ${request.sampling.requestedFps} fps, max ${request.sampling.maxFrames} frames, jpeg quality ${request.sampling.jpegQuality}, payload ${request.sampling.payloadBytes} bytes.`,
+    request.sampling.edgeGate
+      ? `Two-step edge gate: ${request.sampling.edgeGate.strategy}. Browser captured ${request.sampling.edgeGate.inputFrames} frames, selected ${request.sampling.edgeGate.selectedFrames}, skipped ${request.sampling.edgeGate.skippedFrames}, object frames ${request.sampling.edgeGate.objectFrames}, motion frames ${request.sampling.edgeGate.motionFrames}.`
+      : "Two-step edge gate: not reported by this client.",
     "Edge metrics per frame:",
     edgeSummary,
     localObjects.length ? "Local browser detections:\n" + localObjects.join("\n") : "Local browser detections: none above threshold.",

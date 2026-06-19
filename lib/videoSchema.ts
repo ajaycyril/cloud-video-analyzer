@@ -37,6 +37,18 @@ export const videoAnalysisRequestSchema = z.object({
     maxFrames: z.number().int().min(1).max(6),
     jpegQuality: z.number().finite().min(0.3).max(0.9),
     payloadBytes: nonNegativeIntSchema,
+    forceCloud: z.boolean().optional(),
+    edgeGate: z
+      .object({
+        strategy: z.string().min(1),
+        inputFrames: nonNegativeIntSchema,
+        selectedFrames: nonNegativeIntSchema,
+        skippedFrames: nonNegativeIntSchema,
+        objectFrames: nonNegativeIntSchema,
+        motionFrames: nonNegativeIntSchema,
+        staticFrames: nonNegativeIntSchema,
+      })
+      .optional(),
   }),
 });
 

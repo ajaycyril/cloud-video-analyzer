@@ -29,6 +29,7 @@ export function CapabilityGate({ result, children }: { result: CapabilityResult 
             <Requirement label="Canvas ImageData" ok={result.hasCanvasImageData} value={result.hasCanvasImageData ? "Ready" : "Missing"} />
             <Requirement label="Camera API" ok={result.hasMediaDevices} optional value={result.hasMediaDevices ? "Ready" : "Upload-only"} />
             <Requirement label="WebAssembly" ok={result.hasWebAssembly} optional value={result.hasWebAssembly ? "Object hints ready" : "Cloud-only"} />
+            <Requirement label="WebGPU" ok={result.hasWebGPU} optional value={result.hasWebGPU ? "Available" : "Unavailable"} />
             <Requirement label="Secure context" ok={result.isSecureContext} optional value={result.isSecureContext ? "Ready" : "Upload-only"} />
           </div>
           <ul className="blocking-list">
@@ -48,6 +49,7 @@ export function CapabilityGate({ result, children }: { result: CapabilityResult 
         <span>{result.browserName}</span>
         <span>{result.hasMediaDevices ? "camera ready" : "upload ready"}</span>
         <span>{result.hasWebAssembly ? "local object hints" : "cloud-only objects"}</span>
+        <span>{result.hasWebGPU ? "WebGPU edge ready" : "WebGPU unavailable"}</span>
       </div>
       {result.warnings.length ? (
         <div className="compatibility-warning" role="status">

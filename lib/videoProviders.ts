@@ -71,7 +71,7 @@ function withUsage(
     edgeAssessment: {
       ...output.edgeAssessment,
       framesAnalyzed: request.frames.length,
-      cloudFramesSkipped: Math.max(0, request.sampling.maxFrames - request.frames.length),
+      cloudFramesSkipped: request.sampling.edgeGate?.skippedFrames ?? Math.max(0, request.sampling.maxFrames - request.frames.length),
     },
     usage: {
       inputTokens,

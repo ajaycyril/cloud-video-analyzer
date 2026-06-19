@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
+import { selectEdgeTriggeredFrames } from "@/lib/edgeFrameGate";
 import { analyzeVideo } from "@/lib/videoProviders";
-import { videoAnalysisRequestSchema, type SampledFrame } from "@/lib/videoSchema";
+import { videoAnalysisRequestSchema } from "@/lib/videoSchema";
 
 export const runtime = "nodejs";
 
@@ -86,24 +87,6 @@ function modelErrorCode(message: string): string {
   return "MODEL_REQUEST_FAILED";
 }
 
-function frameQualityScore(frame: SampledFrame): number {
-  return frame.edgeMetrics.sharpness + frame.edgeMetrics.visualComplexity + frame.edgeMetrics.brightness * 0.25 - frame.edgeMetrics.motionScore * 0.35;
-}
-
-function selectCloudFrames(frames: SampledFrame[]): SampledFrame[] {
-  const targetFrameCount = Math.min(frames.length, 3);
-  const usableFrames = frames.filter((frame) => frame.edgeMetrics.usable);
-  const candidateFrames = usableFrames.length ? usableFrames : frames;
-  const selected = new Set(
-    candidateFrames
-      .slice()
-      .sort((left, right) => frameQualityScore(right) - frameQualityScore(left))
-      .slice(0, targetFrameCount),
-  );
-
-  return frames.filter((frame) => selected.has(frame));
-}
-
 export async function POST(request: Request) {
   if (!checkRateLimit(request)) {
     return typedError("RATE_LIMITED", "Demo request limit reached. Wait briefly before analyzing again.", 429);
@@ -125,12 +108,28 @@ export async function POST(request: Request) {
     return typedError("REQUEST_INVALID", parsed.error.issues.map((issue) => issue.message).join("; "), 400);
   }
 
-  const cloudFrames = selectCloudFrames(parsed.data.frames);
+  const edgeSelection = selectEdgeTriggeredFrames(parsed.data.frames, 3, { allowFallback: parsed.data.sampling.forceCloud });
+  const cloudFrames = edgeSelection.frames;
+  if (!cloudFrames.length) {
+    return typedError("EDGE_GATE_NO_TRIGGER", "Browser edge gate found no object or motion frames. Enable force cloud analysis to send the best sampled frames anyway.", 422);
+  }
 
   try {
     const analysis = await analyzeVideo({
       ...parsed.data,
       frames: cloudFrames,
+      sampling: {
+        ...parsed.data.sampling,
+        edgeGate: {
+          strategy: edgeSelection.summary.strategy,
+          inputFrames: edgeSelection.summary.inputFrames,
+          selectedFrames: edgeSelection.summary.selectedFrames,
+          skippedFrames: edgeSelection.summary.skippedFrames,
+          objectFrames: edgeSelection.summary.objectFrames,
+          motionFrames: edgeSelection.summary.motionFrames,
+          staticFrames: edgeSelection.summary.staticFrames,
+        },
+      },
     });
     return NextResponse.json(analysis);
   } catch (error) {

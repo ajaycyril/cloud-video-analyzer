@@ -4,6 +4,7 @@ import { AlertTriangle, Camera, Crosshair, FileVideo, Pause, Play, Radar, Rotate
 import Image from "next/image";
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import { buildVideoConstraints, listVideoInputDevices, stopStream, type CameraFacing } from "@/lib/camera";
+import { selectEdgeTriggeredFrames, type EdgeGateSummary } from "@/lib/edgeFrameGate";
 import { canvasToJpegDataUrl, captureVideoFrame, computeEdgeMetrics, type EdgeMetricResult } from "@/lib/edgeMetrics";
 import { detectObjectsForVideo, tryCreateObjectDetector } from "@/lib/mediaPipeDetector";
 import { fallbackObjectChips, summarizeEdgeDetections } from "@/lib/resultPresentation";
@@ -36,6 +37,7 @@ type HoldRecording = {
 };
 
 const MAX_FRAMES = 5;
+const MAX_CLOUD_FRAMES = 3;
 const CAMERA_CAPTURE_WINDOW_MS = 2000;
 const JPEG_QUALITY = 0.58;
 const DEMO_ANALYSIS_LIMIT = Number(process.env.NEXT_PUBLIC_DEMO_ANALYSIS_LIMIT ?? 20);
@@ -340,6 +342,8 @@ export function IndustrialVideoAnalyzer({
   const [liveTranscript, setLiveTranscript] = useState<string[]>([]);
   const [liveFrameCount, setLiveFrameCount] = useState(0);
   const [detectorStatus, setDetectorStatus] = useState(roboflowReady ? "Roboflow specialist detector ready" : "Browser detector active");
+  const [edgeGateSummary, setEdgeGateSummary] = useState<EdgeGateSummary | null>(null);
+  const [forceCloudAnalysis, setForceCloudAnalysis] = useState(true);
 
   useEffect(() => {
     return () => {
@@ -596,7 +600,8 @@ export function IndustrialVideoAnalyzer({
     }
     setStatus("waiting for video frame");
     await waitForVideoData(video);
-    await tryCreateObjectDetector();
+    const detectorRuntime = await tryCreateObjectDetector();
+    setDetectorStatus(detectorRuntime.label);
     previousFrameRef.current = null;
     const frames: SampledFrame[] = [];
 
@@ -691,9 +696,17 @@ export function IndustrialVideoAnalyzer({
 
     setError(null);
     try {
-      const enrichedFrames = await enrichFramesWithRoboflow(frames);
-      setLastFrames(enrichedFrames);
-      setStatus(`sending ${enrichedFrames.length} sampled frames to ${provider}`);
+      const edgeSelection = selectEdgeTriggeredFrames(frames, MAX_CLOUD_FRAMES, { allowFallback: forceCloudAnalysis });
+      setEdgeGateSummary(edgeSelection.summary);
+      setLastFrames(frames);
+      if (!edgeSelection.frames.length) {
+        setStatus("edge gate held cloud request - no object or motion trigger");
+        setError("No cloud request sent: the browser did not detect a usable object or motion trigger. Turn on force cloud analysis to send the best frames anyway.");
+        return false;
+      }
+      const cloudFrames = await enrichFramesWithRoboflow(edgeSelection.frames);
+      setLastFrames(cloudFrames);
+      setStatus(`edge gate selected ${cloudFrames.length} of ${edgeSelection.summary.inputFrames} frames; sending to ${provider}`);
       const response = await fetch("/api/analyze-video", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -703,12 +716,22 @@ export function IndustrialVideoAnalyzer({
           source,
           objective,
           zones,
-          frames: enrichedFrames,
+          frames: cloudFrames,
           sampling: {
             requestedFps: 1,
-            maxFrames: MAX_FRAMES,
+            maxFrames: MAX_CLOUD_FRAMES,
             jpegQuality: JPEG_QUALITY,
-            payloadBytes: payloadBytes(enrichedFrames),
+            payloadBytes: payloadBytes(cloudFrames),
+            forceCloud: forceCloudAnalysis,
+            edgeGate: {
+              strategy: edgeSelection.summary.strategy,
+              inputFrames: edgeSelection.summary.inputFrames,
+              selectedFrames: edgeSelection.summary.selectedFrames,
+              skippedFrames: edgeSelection.summary.skippedFrames,
+              objectFrames: edgeSelection.summary.objectFrames,
+              motionFrames: edgeSelection.summary.motionFrames,
+              staticFrames: edgeSelection.summary.staticFrames,
+            },
           },
         }),
       });
@@ -735,12 +758,13 @@ export function IndustrialVideoAnalyzer({
       setStatus("analysis error");
       return false;
     }
-  }, [enrichFramesWithRoboflow, mode, objective, provider, providerStatus, source, zones]);
+  }, [enrichFramesWithRoboflow, forceCloudAnalysis, mode, objective, provider, providerStatus, source, zones]);
 
   const analyze = useCallback(async () => {
     setAnalyzing(true);
     setError(null);
     setAnalysis(null);
+    setEdgeGateSummary(null);
     setStatus("extracting relevant frames in browser");
     try {
       const frames = await sampleFrames();
@@ -759,6 +783,7 @@ export function IndustrialVideoAnalyzer({
     }
     setError(null);
     setAnalysis(null);
+    setEdgeGateSummary(null);
     setAnalyzing(true);
     setHoldRecording(true);
     holdRecordingRef.current = {
@@ -780,7 +805,8 @@ export function IndustrialVideoAnalyzer({
         throw new Error("Video element is not ready.");
       }
       await waitForVideoData(video);
-      await tryCreateObjectDetector();
+      const detectorRuntime = await tryCreateObjectDetector();
+      setDetectorStatus(detectorRuntime.label);
       previousFrameRef.current = null;
       setStatus("recording locally - release to analyze");
 
@@ -848,6 +874,7 @@ export function IndustrialVideoAnalyzer({
     setError(null);
     setAnalysis(null);
     setLastFrames([]);
+    setEdgeGateSummary(null);
     setStatus(running ? `preview only - ${cameraFacing === "environment" ? "back" : "front"} camera - no cloud upload` : "camera off - no recording");
     previousFrameRef.current = null;
   }, [cameraFacing, running]);
@@ -1111,7 +1138,7 @@ export function IndustrialVideoAnalyzer({
   }, []);
 
   const remaining = Math.max(0, DEMO_ANALYSIS_LIMIT - analysesUsed);
-  const isCloudSending = analyzing && status.startsWith("sending");
+  const isCloudSending = analyzing && (status.startsWith("sending") || status.startsWith("edge gate selected"));
   const isLiveSource = source === "camera";
   const isRecordingLocal = holdRecording && !isCloudSending && isLiveSource;
   const providerLabel = PROVIDER_COPY[provider].label;
@@ -1178,6 +1205,14 @@ export function IndustrialVideoAnalyzer({
   const resultStatus = analysis ? "Scene result" : analyzing ? "Analyzing scene" : "Ready for scene result";
   const evidenceFrame = lastFrames.find((frame) => frame.localDetections.length > 0) ?? lastFrames[0] ?? null;
   const evidenceDetections = evidenceFrame?.localDetections.slice(0, 8) ?? [];
+  const edgeGateLabel = edgeGateSummary
+    ? `${edgeGateSummary.selectedFrames}/${edgeGateSummary.inputFrames} sent`
+    : "waiting";
+  const edgeGateDetail = edgeGateSummary
+    ? `Edge gate: ${edgeGateSummary.objectFrames} object frame${edgeGateSummary.objectFrames === 1 ? "" : "s"}, ${edgeGateSummary.motionFrames} motion frame${edgeGateSummary.motionFrames === 1 ? "" : "s"}, ${edgeGateSummary.skippedFrames} skipped.`
+    : forceCloudAnalysis
+      ? "Edge gate prefers object/motion frames; force cloud fallback is on."
+      : "Edge gate waits for local objects or motion before sending frames.";
 
   return (
     <main className="industrial-shell">
@@ -1185,11 +1220,11 @@ export function IndustrialVideoAnalyzer({
         <div>
           <p className="eyebrow">Cloud video analytics API showcase</p>
           <h1>Ask Gemini/OpenAI anything about live video.</h1>
-          <p className="app-subtitle">Point the camera, upload a clip, or run a sample. Safari, Edge, Chrome, and desktop uploads use local canvas frame sampling; cloud models return objects, evidence, cost, and next actions.</p>
+          <p className="app-subtitle">Point the camera, upload a clip, or run a sample. The browser first detects objects and motion, then only triggered frames go to cloud vision models for evidence, cost, and next actions.</p>
         </div>
         <div className="loop">
           <span>video</span>
-          <span>browser frame sampler</span>
+          <span>edge object + motion gate</span>
           <span>plain-language objective</span>
           <span>Gemini/OpenAI Vision/Cosmos</span>
           <span>alert API</span>
@@ -1277,6 +1312,10 @@ export function IndustrialVideoAnalyzer({
               </div>
               <div className="scene-result-metrics">
                 <div>
+                  <span>Edge gate</span>
+                  <strong>{edgeGateLabel}</strong>
+                </div>
+                <div>
                   <span>Frames</span>
                   <strong>{analysis?.edgeAssessment.framesAnalyzed ?? (lastFrames.length || "--")}</strong>
                 </div>
@@ -1297,7 +1336,7 @@ export function IndustrialVideoAnalyzer({
                   </span>
                 ))}
                 {!objectChips.length ? <span>No objects captured yet</span> : null}
-                <small>{detectorStatus}</small>
+                <small>{detectorStatus}. {edgeGateDetail}</small>
               </div>
               {evidenceFrame ? (
                 <div className="evidence-frame-panel" aria-label="Evidence frame with detections">
@@ -1495,14 +1534,22 @@ export function IndustrialVideoAnalyzer({
               <strong>{cameraCaptureState}</strong>
               <span>
                 {isCloudSending
-                  ? `Only selected JPEG keyframes are in the cloud now. ${detectorStatus}.`
-                  : `${sourceCaptureDetail} ${detectorStatus}. Full video is not uploaded.`}
+                  ? `Only edge-triggered JPEG keyframes are in the cloud now. ${edgeGateDetail}`
+                  : `${sourceCaptureDetail} ${detectorStatus}. ${edgeGateDetail} Full video is not uploaded.`}
               </span>
             </div>
+
+            <label className="force-cloud-toggle">
+              <input checked={forceCloudAnalysis} onChange={(event) => setForceCloudAnalysis(event.target.checked)} type="checkbox" />
+              <span>
+                <strong>Force cloud if edge gate is quiet</strong>
+                <small>{forceCloudAnalysis ? "Demo-safe: always returns an answer." : "Strict efficiency: cloud only after local object/motion trigger."}</small>
+              </span>
+            </label>
           </div>
 
           <p className="panel-note">
-            Camera mode sends one request after you release the record button. Full video stays in the browser; only selected JPEG keyframes are sent.
+            Camera mode sends one request after you release the record button. Full video stays in the browser; only object/motion-triggered JPEG keyframes are sent.
             Upload mode works without camera access on Safari, Edge, Chrome, and desktop browsers that support video canvas extraction.
           </p>
         </div>

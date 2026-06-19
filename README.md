@@ -6,7 +6,7 @@ Live demo: https://cloud-video-analyzer.vercel.app
 
 This project shows how general-purpose multimodal models can be used as a flexible video analytics layer. A user can point a phone camera at a scene, upload a clip, or select a demo video, describe the analytics they need in plain language, and receive structured alerts, timeline evidence, recommended actions, latency, and estimated cloud cost.
 
-The core architecture is intentionally hybrid: the browser does the lightweight video preprocessing, then only selected JPEG keyframes and edge signals are sent to cloud vision APIs. The full video is not uploaded by default.
+The core architecture is intentionally hybrid: the browser does lightweight video preprocessing, local object detection, and motion gating, then only object/motion-triggered JPEG keyframes and edge signals are sent to cloud vision APIs. The full video is not uploaded by default.
 
 ## Screenshots
 
@@ -37,8 +37,9 @@ The core architecture is intentionally hybrid: the browser does the lightweight 
 1. Preview a live camera feed, upload a clip, or select a built-in demo video.
 2. For live video, capture a short local burst in the browser.
 3. For uploaded or sample video, sample keyframes across the full clip duration.
-4. Send only selected JPEG keyframes and metadata to the configured cloud model.
-5. Render structured alerts, evidence, actions, and a browser-side annotation overlay.
+4. Run the object/motion edge gate and skip static frames before cloud analysis.
+5. Send only triggered JPEG keyframes and metadata to the configured cloud model.
+6. Render structured alerts, evidence, actions, and a browser-side annotation overlay.
 
 ## Demo Modes
 
@@ -58,7 +59,8 @@ Browser preprocessing
 - capture window or full-clip keyframe sampling
 - JPEG compression
 - visual quality and motion metrics
-- optional local object detection
+- local object detection
+- object/motion edge gate
         |
         v
 Server-side provider router
@@ -88,6 +90,7 @@ Structured video analytics response
 - OpenAI-compatible Responses API flow for vision frames
 - MediaPipe Tasks Vision for browser-side object detection hooks
 - Optional Roboflow hosted object detection enrichment
+- Object/motion edge gate before cloud model calls
 - Browser canvas keyframe extraction
 - Vercel production deployment
 

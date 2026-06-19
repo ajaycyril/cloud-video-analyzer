@@ -3,11 +3,24 @@ import type { LocalDetection } from "./types";
 
 const MODEL_PATH = "/models/efficientdet_lite0.tflite";
 const WASM_PATH = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
-const MIN_DETECTION_SCORE = 0.68;
-const MIN_BOX_AREA = 0.012;
-const MAX_DETECTIONS = 5;
+const MIN_DETECTION_SCORE = 0.45;
+const MIN_BOX_AREA = 0.004;
+const MAX_DETECTIONS = 8;
 
 let detectorPromise: Promise<ObjectDetector> | null = null;
+let detectorRuntime: EdgeDetectorRuntime = {
+  ready: false,
+  delegate: "unavailable",
+  webGpuAvailable: false,
+  label: "Browser detector not loaded",
+};
+
+export type EdgeDetectorRuntime = {
+  ready: boolean;
+  delegate: "GPU" | "CPU" | "unavailable";
+  webGpuAvailable: boolean;
+  label: string;
+};
 
 function normalize(value: number, max: number): number {
   if (!Number.isFinite(value) || max <= 0) {
@@ -16,39 +29,76 @@ function normalize(value: number, max: number): number {
   return Math.max(0, Math.min(1, value / max));
 }
 
+function hasWebGpu(): boolean {
+  return typeof navigator !== "undefined" && Boolean((navigator as Navigator & { gpu?: unknown }).gpu);
+}
+
+async function createDetectorWithDelegate(delegate: "GPU" | "CPU"): Promise<ObjectDetector> {
+  const vision = await FilesetResolver.forVisionTasks(WASM_PATH);
+  return ObjectDetector.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath: MODEL_PATH,
+      delegate,
+    },
+    runningMode: "VIDEO",
+    scoreThreshold: MIN_DETECTION_SCORE,
+    maxResults: MAX_DETECTIONS,
+  });
+}
+
 export async function createObjectDetector(): Promise<ObjectDetector> {
   if (!detectorPromise) {
     detectorPromise = (async () => {
+      const webGpuAvailable = hasWebGpu();
       const response = await fetch(MODEL_PATH, { method: "HEAD" });
       if (!response.ok) {
         throw new Error("Edge object detection model missing at /models/efficientdet_lite0.tflite.");
       }
 
-      const vision = await FilesetResolver.forVisionTasks(WASM_PATH);
-      return ObjectDetector.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: MODEL_PATH,
+      try {
+        const gpuDetector = await createDetectorWithDelegate("GPU");
+        detectorRuntime = {
+          ready: true,
+          delegate: "GPU",
+          webGpuAvailable,
+          label: webGpuAvailable ? "Browser detector active: GPU delegate, WebGPU available" : "Browser detector active: GPU delegate",
+        };
+        return gpuDetector;
+      } catch {
+        const cpuDetector = await createDetectorWithDelegate("CPU");
+        detectorRuntime = {
+          ready: true,
           delegate: "CPU",
-        },
-        runningMode: "VIDEO",
-        scoreThreshold: MIN_DETECTION_SCORE,
-        maxResults: MAX_DETECTIONS,
-      });
+          webGpuAvailable,
+          label: webGpuAvailable ? "Browser detector active: CPU fallback, WebGPU available" : "Browser detector active: CPU fallback",
+        };
+        return cpuDetector;
+      }
     })().catch((error) => {
       detectorPromise = null;
+      detectorRuntime = {
+        ready: false,
+        delegate: "unavailable",
+        webGpuAvailable: hasWebGpu(),
+        label: hasWebGpu() ? "Object detector unavailable; WebGPU available" : "Object detector unavailable",
+      };
       throw error;
     });
   }
   return detectorPromise;
 }
 
-export async function tryCreateObjectDetector(): Promise<boolean> {
+export async function tryCreateObjectDetector(): Promise<EdgeDetectorRuntime> {
   try {
     await createObjectDetector();
-    return true;
+    return detectorRuntime;
   } catch {
-    return false;
+    return detectorRuntime;
   }
+}
+
+export function getObjectDetectorRuntime(): EdgeDetectorRuntime {
+  return detectorRuntime;
 }
 
 export function mapDetections(result: ObjectDetectorResult, video: HTMLVideoElement): LocalDetection[] {
