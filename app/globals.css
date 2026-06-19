@@ -957,6 +957,15 @@ h3 {
   color: #ffffff;
 }
 
+.live-detection-box.edge-proposal {
+  border-style: dashed;
+  border-color: #10b981;
+}
+
+.live-detection-box.edge-proposal span {
+  background: rgba(16, 185, 129, 0.92);
+}
+
 .edge-live-hud {
   background: rgba(4, 19, 12, 0.84);
   border: 1px solid rgba(25, 195, 125, 0.34);

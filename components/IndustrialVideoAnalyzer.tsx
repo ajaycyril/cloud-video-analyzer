@@ -58,8 +58,8 @@ const SMART_RECORDING_MAX_MS = 4200;
 const SMART_RECORDING_INTERVAL_MS = 360;
 const EDGE_MOTION_TRIGGER_SCORE = 8;
 const EDGE_OBJECT_TRIGGER_SCORE = 0.5;
-const MOTION_GRID_COLUMNS = 12;
-const MOTION_GRID_ROWS = 8;
+const MOTION_GRID_COLUMNS = 18;
+const MOTION_GRID_ROWS = 12;
 const MOTION_CELL_TRIGGER = 26;
 const JPEG_QUALITY = 0.58;
 const DEMO_ANALYSIS_LIMIT = Number(process.env.NEXT_PUBLIC_DEMO_ANALYSIS_LIMIT ?? 20);
@@ -239,6 +239,93 @@ function overlayStyleForDetection(detection: LocalDetection, viewport: VideoView
   };
 }
 
+type ProposalCell = {
+  x: number;
+  y: number;
+  weight: number;
+};
+
+function componentDetections(cells: ProposalCell[], label: string, baseScore: number, limit: number): LocalDetection[] {
+  const byKey = new Map(cells.map((cell) => [`${cell.x}:${cell.y}`, cell]));
+  const visited = new Set<string>();
+  const components: ProposalCell[][] = [];
+
+  for (const cell of cells) {
+    const startKey = `${cell.x}:${cell.y}`;
+    if (visited.has(startKey)) {
+      continue;
+    }
+    const stack = [cell];
+    const component: ProposalCell[] = [];
+    visited.add(startKey);
+    while (stack.length) {
+      const current = stack.pop();
+      if (!current) {
+        continue;
+      }
+      component.push(current);
+      for (let ny = current.y - 1; ny <= current.y + 1; ny += 1) {
+        for (let nx = current.x - 1; nx <= current.x + 1; nx += 1) {
+          if (nx === current.x && ny === current.y) {
+            continue;
+          }
+          const key = `${nx}:${ny}`;
+          const next = byKey.get(key);
+          if (next && !visited.has(key)) {
+            visited.add(key);
+            stack.push(next);
+          }
+        }
+      }
+    }
+    components.push(component);
+  }
+
+  return components
+    .map((component) => {
+      const minX = Math.min(...component.map((cell) => cell.x));
+      const minY = Math.min(...component.map((cell) => cell.y));
+      const maxX = Math.max(...component.map((cell) => cell.x));
+      const maxY = Math.max(...component.map((cell) => cell.y));
+      const avgWeight = component.reduce((sum, cell) => sum + cell.weight, 0) / component.length;
+      const w = (maxX - minX + 1) / MOTION_GRID_COLUMNS;
+      const h = (maxY - minY + 1) / MOTION_GRID_ROWS;
+      return {
+        label,
+        score: Math.max(baseScore, Math.min(0.94, avgWeight)),
+        x: Math.max(0, minX / MOTION_GRID_COLUMNS),
+        y: Math.max(0, minY / MOTION_GRID_ROWS),
+        w: Math.min(1, w),
+        h: Math.min(1, h),
+      };
+    })
+    .filter((detection) => detection.w * detection.h >= 0.02 && detection.w <= 0.9 && detection.h <= 0.9)
+    .sort((left, right) => right.score * right.w * right.h - left.score * left.w * left.h)
+    .slice(0, limit);
+}
+
+function proposalOverlap(a: LocalDetection, b: LocalDetection): number {
+  const left = Math.max(a.x, b.x);
+  const top = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.w, b.x + b.w);
+  const bottom = Math.min(a.y + a.h, b.y + b.h);
+  const intersection = Math.max(0, right - left) * Math.max(0, bottom - top);
+  const smallerArea = Math.min(a.w * a.h, b.w * b.h);
+  return smallerArea > 0 ? intersection / smallerArea : 0;
+}
+
+function mergeProposalDetections(detections: LocalDetection[]): LocalDetection[] {
+  return detections
+    .sort((left, right) => right.score - left.score)
+    .reduce<LocalDetection[]>((merged, detection) => {
+      if (merged.some((existing) => proposalOverlap(existing, detection) > 0.74)) {
+        return merged;
+      }
+      return [...merged, detection];
+    }, [])
+    .slice(0, 5);
+}
+
 function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapshot | null): {
   snapshot: MotionSnapshot;
   detections: LocalDetection[];
@@ -271,46 +358,48 @@ function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapsho
 
   const snapshot = { width, height, cells };
   const visualCells: Array<{ x: number; y: number; range: number }> = [];
+  const darkPanelCells: ProposalCell[] = [];
   for (let index = 0; index < cells.length; index += 1) {
     const range = maximums[index] - minimums[index];
+    const x = index % MOTION_GRID_COLUMNS;
+    const y = Math.floor(index / MOTION_GRID_COLUMNS);
     if (range >= 42) {
       visualCells.push({
-        x: index % MOTION_GRID_COLUMNS,
-        y: Math.floor(index / MOTION_GRID_COLUMNS),
+        x,
+        y,
         range,
+      });
+    }
+    if (cells[index] <= 94 && range >= 10) {
+      darkPanelCells.push({
+        x,
+        y,
+        weight: Math.min(0.94, 0.48 + (94 - cells[index]) / 120 + range / 180),
       });
     }
   }
 
-  const visualDetection = (() => {
-    if (!visualCells.length) {
-      return {
-        label: "scene region",
-        score: 0.5,
-        x: 0.22,
-        y: 0.18,
-        w: 0.56,
-        h: 0.58,
-      };
-    }
-    const sorted = visualCells.slice().sort((left, right) => right.range - left.range).slice(0, Math.max(4, Math.ceil(visualCells.length * 0.42)));
-    const minX = Math.min(...sorted.map((cell) => cell.x));
-    const minY = Math.min(...sorted.map((cell) => cell.y));
-    const maxX = Math.max(...sorted.map((cell) => cell.x));
-    const maxY = Math.max(...sorted.map((cell) => cell.y));
-    const avgRange = sorted.reduce((sum, cell) => sum + cell.range, 0) / sorted.length;
-    return {
-      label: "edge attention",
-      score: Math.max(0.52, Math.min(0.88, avgRange / 110)),
-      x: Math.max(0, minX / MOTION_GRID_COLUMNS),
-      y: Math.max(0, minY / MOTION_GRID_ROWS),
-      w: Math.min(1, (maxX - minX + 1) / MOTION_GRID_COLUMNS),
-      h: Math.min(1, (maxY - minY + 1) / MOTION_GRID_ROWS),
-    };
-  })();
+  const darkPanelDetections = componentDetections(darkPanelCells, "screen / dark panel", 0.62, 3).filter(
+    (detection) => detection.w >= 0.18 && detection.h >= 0.12,
+  );
+  const visualDetections = componentDetections(
+    visualCells.map((cell) => ({ x: cell.x, y: cell.y, weight: Math.min(0.9, cell.range / 110) })),
+    "edge attention",
+    0.52,
+    3,
+  );
+  const fallbackDetection: LocalDetection = {
+    label: "scene region",
+    score: 0.5,
+    x: 0.22,
+    y: 0.18,
+    w: 0.56,
+    h: 0.58,
+  };
+  const staticProposals = mergeProposalDetections([...darkPanelDetections, ...visualDetections, fallbackDetection]);
 
   if (!previous || previous.width !== width || previous.height !== height) {
-    return { snapshot, detections: [visualDetection] };
+    return { snapshot, detections: staticProposals };
   }
 
   const changedCells: Array<{ x: number; y: number; diff: number }> = [];
@@ -326,29 +415,18 @@ function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapsho
   }
 
   if (!changedCells.length) {
-    return { snapshot, detections: [visualDetection] };
+    return { snapshot, detections: staticProposals };
   }
 
-  const minX = Math.min(...changedCells.map((cell) => cell.x));
-  const minY = Math.min(...changedCells.map((cell) => cell.y));
-  const maxX = Math.max(...changedCells.map((cell) => cell.x));
-  const maxY = Math.max(...changedCells.map((cell) => cell.y));
-  const avgDiff = changedCells.reduce((sum, cell) => sum + cell.diff, 0) / changedCells.length;
-  const coverage = changedCells.length / cells.length;
-
+  const motionDetections = componentDetections(
+    changedCells.map((cell) => ({ x: cell.x, y: cell.y, weight: Math.min(0.94, cell.diff / 90) })),
+    "motion region",
+    0.58,
+    2,
+  );
   return {
     snapshot,
-    detections: [
-      {
-        label: "motion region",
-        score: Math.max(0.45, Math.min(0.94, avgDiff / 90 + coverage)),
-        x: Math.max(0, minX / MOTION_GRID_COLUMNS),
-        y: Math.max(0, minY / MOTION_GRID_ROWS),
-        w: Math.min(1, (maxX - minX + 1) / MOTION_GRID_COLUMNS),
-        h: Math.min(1, (maxY - minY + 1) / MOTION_GRID_ROWS),
-      },
-      visualDetection,
-    ],
+    detections: mergeProposalDetections([...motionDetections, ...staticProposals]),
   };
 }
 
@@ -1657,7 +1735,7 @@ export function IndustrialVideoAnalyzer({
               <div className="live-detection-overlay" aria-label="Browser edge detection overlay">
                 {liveOverlayDetections.map((detection, index) => (
                   <div
-                    className={`live-detection-box ${cloudConfirmedLabels.has(detection.label.toLowerCase()) ? "cloud-confirmed" : ""}`}
+                    className={`live-detection-box ${detection.label.includes("/") || detection.label.includes("region") || detection.label.includes("attention") ? "edge-proposal" : ""} ${cloudConfirmedLabels.has(detection.label.toLowerCase()) ? "cloud-confirmed" : ""}`}
                     key={`${detection.label}-${index}-${detection.x}-${detection.y}`}
                     style={overlayStyleForDetection(detection, videoViewport)}
                   >
