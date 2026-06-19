@@ -9,6 +9,7 @@ const MIN_BOX_AREA = 0.006;
 const MAX_DETECTIONS = 8;
 
 let detectorPromise: Promise<ObjectDetector> | null = null;
+let lastVideoTimestampMs = 0;
 let detectorRuntime: EdgeDetectorRuntime = {
   ready: false,
   delegate: "unavailable",
@@ -117,6 +118,20 @@ export function mapDetections(result: ObjectDetectorResult, video: HTMLVideoElem
 
 export async function detectObjectsForVideo(video: HTMLVideoElement, timestampMs: number): Promise<LocalDetection[]> {
   const detector = await createObjectDetector();
-  const result = detector.detectForVideo(video, timestampMs);
-  return mapDetections(result, video);
+  const safeTimestamp = Math.max(Math.round(timestampMs), lastVideoTimestampMs + 1);
+  lastVideoTimestampMs = safeTimestamp;
+  try {
+    const result = detector.detectForVideo(video, safeTimestamp);
+    return mapDetections(result, video);
+  } catch (error) {
+    detectorPromise = null;
+    lastVideoTimestampMs = 0;
+    detectorRuntime = {
+      ready: false,
+      delegate: "unavailable",
+      webGpuAvailable: hasWebGpu(),
+      label: "Object detector restarting after camera timestamp reset",
+    };
+    throw error;
+  }
 }

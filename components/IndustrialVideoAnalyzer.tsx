@@ -57,8 +57,8 @@ const CAMERA_CAPTURE_WINDOW_MS = 1600;
 const PREVIEW_DETECTION_INTERVAL_MS = 180;
 const TRANSFORMERS_LIVE_INTERVAL_MS = 1400;
 const SMART_RECORDING_MIN_MS = 1100;
-const SMART_RECORDING_MAX_MS = 2600;
-const SMART_RECORDING_INTERVAL_MS = 260;
+const SMART_RECORDING_MAX_MS = 2200;
+const SMART_RECORDING_INTERVAL_MS = 320;
 const EDGE_MOTION_TRIGGER_SCORE = 8;
 const EDGE_OBJECT_TRIGGER_SCORE = 0.5;
 const MOTION_GRID_COLUMNS = 18;
@@ -523,6 +523,8 @@ export function IndustrialVideoAnalyzer({
   const liveTimerRef = useRef<number | null>(null);
   const liveStreamingStartedRef = useRef(false);
   const liveStartedAtRef = useRef(0);
+  const liveCloudBusyRef = useRef(false);
+  const liveLastCloudAtRef = useRef(0);
   const previewDetectionFrameRef = useRef<number | null>(null);
   const previewDetectionBusyRef = useRef(false);
   const lastPreviewDetectionAtRef = useRef(0);
@@ -567,7 +569,9 @@ export function IndustrialVideoAnalyzer({
   const [liveRunning, setLiveRunning] = useState(false);
   const [liveEvents, setLiveEvents] = useState<string[]>([]);
   const [liveTranscript, setLiveTranscript] = useState<string[]>([]);
+  const [liveGeminiInsight, setLiveGeminiInsight] = useState<string | null>(null);
   const [liveFrameCount, setLiveFrameCount] = useState(0);
+  const [liveUsage, setLiveUsage] = useState({ requests: 0, frames: 0, costUsd: 0, lastLatencyMs: 0 });
   const [detectorStatus, setDetectorStatus] = useState(roboflowReady ? "Roboflow specialist detector ready" : "Browser detector active");
   const [edgeGateSummary, setEdgeGateSummary] = useState<EdgeGateSummary | null>(null);
   const [forceCloudAnalysis, setForceCloudAnalysis] = useState(true);
@@ -644,10 +648,7 @@ export function IndustrialVideoAnalyzer({
     if (!frameRect.width || !frameRect.height) {
       return;
     }
-    const scale =
-      source === "camera"
-        ? Math.max(frameRect.width / video.videoWidth, frameRect.height / video.videoHeight)
-        : Math.min(frameRect.width / video.videoWidth, frameRect.height / video.videoHeight);
+    const scale = Math.min(frameRect.width / video.videoWidth, frameRect.height / video.videoHeight);
     const renderedWidth = video.videoWidth * scale;
     const renderedHeight = video.videoHeight * scale;
     setVideoViewport({
@@ -656,7 +657,7 @@ export function IndustrialVideoAnalyzer({
       w: (renderedWidth / frameRect.width) * 100,
       h: (renderedHeight / frameRect.height) * 100,
     });
-  }, [source]);
+  }, []);
 
   const updateVideoOrientation = useCallback(() => {
     const video = videoRef.current;
@@ -778,8 +779,11 @@ export function IndustrialVideoAnalyzer({
     lastRollingFrameAtRef.current = 0;
     lastTransformersDetectionAtRef.current = 0;
 
-    const runPreviewDetection = async (now: number) => {
+  const runPreviewDetection = async (now: number) => {
       if (previewDetectionBusyRef.current) {
+        return;
+      }
+      if (holdRecordingRef.current.active) {
         return;
       }
       const video = videoRef.current;
@@ -846,7 +850,7 @@ export function IndustrialVideoAnalyzer({
           }
           return;
         }
-        const shouldRunTransformers = Boolean(frameDataUrl) && now - lastTransformersDetectionAtRef.current >= TRANSFORMERS_LIVE_INTERVAL_MS;
+        const shouldRunTransformers = source !== "camera" && Boolean(frameDataUrl) && now - lastTransformersDetectionAtRef.current >= TRANSFORMERS_LIVE_INTERVAL_MS;
         if (shouldRunTransformers) {
           lastTransformersDetectionAtRef.current = now;
         }
@@ -1054,14 +1058,14 @@ export function IndustrialVideoAnalyzer({
     [clearVideoObjectUrl, warmVideoElement],
   );
 
-  const captureOneFrame = useCallback(async (timestampMs: number): Promise<SampledFrame | null> => {
+  const captureOneFrame = useCallback(async (timestampMs: number, options: { lightweight?: boolean } = {}): Promise<SampledFrame | null> => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
       return null;
     }
 
-    const imageData = captureVideoFrame(video, canvas, 640);
+    const imageData = captureVideoFrame(video, canvas, options.lightweight ? 360 : 640);
     if (!imageData) {
       return null;
     }
@@ -1075,13 +1079,28 @@ export function IndustrialVideoAnalyzer({
 
     let localDetections: LocalDetection[] = [];
     if (source === "camera") {
-      localDetections = latestPreviewDetectionsRef.current;
+      try {
+        const mediaPipeDetections = options.lightweight ? [] : await detectObjectsForVideo(video, performance.now());
+        localDetections = mergeProposalDetections([
+          ...mediaPipeDetections,
+          ...proposalResult.detections,
+          ...latestPreviewDetectionsRef.current,
+        ]);
+      } catch {
+        localDetections = mergeProposalDetections([
+          ...proposalResult.detections,
+          ...latestPreviewDetectionsRef.current,
+        ]);
+      }
+      setPreviewDetections(localDetections);
+      latestPreviewDetectionsRef.current = localDetections;
+      updateVideoViewport();
     } else {
       try {
         const imageDataUrl = canvasToJpegDataUrl(canvas, JPEG_QUALITY);
         const [mediaPipeDetections, transformerDetections] = await Promise.all([
           detectObjectsForVideo(video, performance.now()),
-          detectObjectsWithTransformers(imageDataUrl, 2500),
+          options.lightweight ? Promise.resolve([]) : detectObjectsWithTransformers(imageDataUrl, 2500),
         ]);
         localDetections = mergeProposalDetections([
           ...mediaPipeDetections,
@@ -1244,36 +1263,47 @@ export function IndustrialVideoAnalyzer({
       const cloudFrames = await enrichFramesWithRoboflow(edgeSelection.frames);
       setLastFrames(cloudFrames);
       setStatus(`edge gate selected ${cloudFrames.length} of ${edgeSelection.summary.inputFrames} frames; sending to ${provider}`);
-      const response = await fetch("/api/analyze-video", {
+      const buildRequestBody = (selectedFrames: SampledFrame[]) => JSON.stringify({
+        provider,
+        mode,
+        source,
+        objective,
+        zones,
+        frames: selectedFrames,
+        sampling: {
+          requestedFps: 1,
+          maxFrames: MAX_CLOUD_FRAMES,
+          jpegQuality: JPEG_QUALITY,
+          payloadBytes: payloadBytes(selectedFrames),
+          forceCloud: forceCloudAnalysis,
+          edgeGate: {
+            strategy: edgeSelection.summary.strategy,
+            inputFrames: edgeSelection.summary.inputFrames,
+            selectedFrames: selectedFrames.length,
+            skippedFrames: Math.max(0, edgeSelection.summary.inputFrames - selectedFrames.length),
+            objectFrames: edgeSelection.summary.objectFrames,
+            motionFrames: edgeSelection.summary.motionFrames,
+            staticFrames: edgeSelection.summary.staticFrames,
+          },
+        },
+      });
+      let response = await fetch("/api/analyze-video", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          provider,
-          mode,
-          source,
-          objective,
-          zones,
-          frames: cloudFrames,
-          sampling: {
-            requestedFps: 1,
-            maxFrames: MAX_CLOUD_FRAMES,
-            jpegQuality: JPEG_QUALITY,
-            payloadBytes: payloadBytes(cloudFrames),
-            forceCloud: forceCloudAnalysis,
-            edgeGate: {
-              strategy: edgeSelection.summary.strategy,
-              inputFrames: edgeSelection.summary.inputFrames,
-              selectedFrames: edgeSelection.summary.selectedFrames,
-              skippedFrames: edgeSelection.summary.skippedFrames,
-              objectFrames: edgeSelection.summary.objectFrames,
-              motionFrames: edgeSelection.summary.motionFrames,
-              staticFrames: edgeSelection.summary.staticFrames,
-            },
-          },
-        }),
+        body: buildRequestBody(cloudFrames),
       });
 
-      const payload: unknown = await response.json();
+      let payload: unknown = await response.json();
+      if (!response.ok && cloudFrames.length > 1) {
+        const retryFrames = cloudFrames.slice(0, 1);
+        setStatus(`cloud retry with strongest edge frame`);
+        response = await fetch("/api/analyze-video", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: buildRequestBody(retryFrames),
+        });
+        payload = await response.json();
+      }
       if (!response.ok) {
         if (isApiError(payload)) {
           throw new Error(payload.detail ?? payload.error ?? "Analysis route failed.");
@@ -1379,7 +1409,7 @@ export function IndustrialVideoAnalyzer({
         const elapsedMs = Math.max(0, performance.now() - holdRecordingRef.current.startedAt);
         const progress = Math.min(1, elapsedMs / SMART_RECORDING_MAX_MS);
         setRecordingProgress(progress);
-        const frame = await captureOneFrame(elapsedMs);
+        const frame = await captureOneFrame(elapsedMs, { lightweight: true });
         if (frame) {
           const nextFrames = [...holdRecordingRef.current.frames, frame].slice(-MAX_FRAMES);
           holdRecordingRef.current.frames = nextFrames;
@@ -1399,7 +1429,7 @@ export function IndustrialVideoAnalyzer({
       }
 
       if (!holdRecordingRef.current.frames.length) {
-        const frame = await captureOneFrame(Math.max(0, performance.now() - holdRecordingRef.current.startedAt));
+        const frame = await captureOneFrame(Math.max(0, performance.now() - holdRecordingRef.current.startedAt), { lightweight: true });
         if (frame) {
           holdRecordingRef.current.frames = [frame];
           setLastFrames([frame]);
@@ -1487,6 +1517,8 @@ export function IndustrialVideoAnalyzer({
     liveSocketRef.current = null;
     liveStreamingStartedRef.current = false;
     liveStartedAtRef.current = 0;
+    liveCloudBusyRef.current = false;
+    liveLastCloudAtRef.current = 0;
     setLiveRunning(false);
     setLiveStatus("Live edge camera stopped");
   }, []);
@@ -1499,16 +1531,19 @@ export function IndustrialVideoAnalyzer({
       }
       liveStreamingStartedRef.current = true;
       liveStartedAtRef.current = performance.now();
+      liveCloudBusyRef.current = false;
+      liveLastCloudAtRef.current = 0;
       setLiveRunning(true);
-      setLiveStatus("Local live edge stream active");
-      setStatus("Local live camera analytics active - press Stop Live to end");
-      setLiveTranscript((items) => addRecent(items, `${reason} Running local edge commentary with live boxes and motion gating.`));
+      setLiveStatus("Gemini live commentary active");
+      setStatus("Live camera analytics active - local edge plus periodic Gemini commentary");
+      setLiveTranscript((items) => addRecent(items, `${reason} Local edge boxes update continuously; Gemini receives selected snapshots for live commentary.`));
 
       const sendLocalFrame = async () => {
         if (!liveStreamingStartedRef.current) {
           return;
         }
-        const frame = await captureOneFrame(Math.max(0, performance.now() - liveStartedAtRef.current));
+        const now = performance.now();
+        const frame = await captureOneFrame(Math.max(0, now - liveStartedAtRef.current), { lightweight: true });
         if (!frame) {
           return;
         }
@@ -1523,18 +1558,82 @@ export function IndustrialVideoAnalyzer({
             `Edge frame: ${labels}; motion ${Math.round(frame.edgeMetrics.motionScore)}; ${frame.edgeMetrics.usable ? "usable for cloud" : frame.edgeMetrics.rejectionReason ?? "low quality"}.`,
           ),
         );
+
+        const cloudIntervalMs = 4200;
+        if (providerStatus.gemini && !liveCloudBusyRef.current && now - liveLastCloudAtRef.current >= cloudIntervalMs) {
+          liveCloudBusyRef.current = true;
+          liveLastCloudAtRef.current = now;
+          setLiveStatus("Gemini reading latest snapshot");
+          try {
+            const response = await fetch("/api/analyze-video", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                provider: "gemini",
+                mode,
+                source: "camera",
+                objective: `Live camera commentary. In one short sentence, describe what changed or what is important now. User objective: ${objective}`,
+                zones,
+                frames: [frame],
+                sampling: {
+                  requestedFps: 1,
+                  maxFrames: 1,
+                  jpegQuality: JPEG_QUALITY,
+                  payloadBytes: payloadBytes([frame]),
+                  forceCloud: true,
+                  edgeGate: {
+                    strategy: "live snapshot",
+                    inputFrames: 1,
+                    selectedFrames: 1,
+                    skippedFrames: 0,
+                    objectFrames: frame.localDetections.length ? 1 : 0,
+                    motionFrames: frame.edgeMetrics.motionScore >= EDGE_MOTION_TRIGGER_SCORE ? 1 : 0,
+                    staticFrames: frame.localDetections.length || frame.edgeMetrics.motionScore >= EDGE_MOTION_TRIGGER_SCORE ? 0 : 1,
+                  },
+                },
+              }),
+            });
+            const payload = await response.json().catch(() => null);
+            if (response.ok && payload?.commentary) {
+              const nextAnalysis = payload as VideoAnalysisResponse;
+              setAnalysis(nextAnalysis);
+              setLiveStatus(`Gemini live response - ${nextAnalysis.usage.latencyMs}ms`);
+              setLiveGeminiInsight(`Gemini: ${nextAnalysis.commentary}`);
+              setLiveTranscript((items) => addRecent(items, `Gemini: ${nextAnalysis.commentary}`, 5));
+              setLiveUsage((usage) => ({
+                requests: usage.requests + 1,
+                frames: usage.frames + nextAnalysis.edgeAssessment.framesAnalyzed,
+                costUsd: usage.costUsd + nextAnalysis.usage.estimatedCostUsd,
+                lastLatencyMs: nextAnalysis.usage.latencyMs,
+              }));
+              setLiveEvents((items) => addRecent(items, `${nextAnalysis.edgeAssessment.framesAnalyzed} frame / ${formatCost(nextAnalysis.usage.estimatedCostUsd)}`, 5));
+            } else {
+              setLiveStatus("Gemini live snapshot skipped");
+              if (payload?.detail || payload?.error) {
+                setLiveEvents((items) => addRecent(items, `Cloud skipped: ${payload.detail ?? payload.error}`, 5));
+              }
+            }
+          } catch {
+            setLiveStatus("Gemini live retrying");
+            setLiveEvents((items) => addRecent(items, "Cloud commentary retrying on next snapshot", 5));
+          } finally {
+            liveCloudBusyRef.current = false;
+          }
+        }
       };
 
       void sendLocalFrame();
       liveTimerRef.current = window.setInterval(() => {
         void sendLocalFrame();
-      }, 900);
+      }, 1000);
     };
 
     setError(null);
     setLiveTranscript([]);
+    setLiveGeminiInsight(null);
     setLiveEvents([]);
     setLiveFrameCount(0);
+    setLiveUsage({ requests: 0, frames: 0, costUsd: 0, lastLatencyMs: 0 });
     liveStreamingStartedRef.current = false;
     liveStartedAtRef.current = 0;
     setLiveStatus("starting live edge camera");
@@ -1555,7 +1654,7 @@ export function IndustrialVideoAnalyzer({
       setError(readableError(liveError));
       setLiveTranscript((items) => addRecent(items, readableError(liveError)));
     }
-  }, [cameraFacing, captureOneFrame, running, source, startCamera]);
+  }, [cameraFacing, captureOneFrame, mode, objective, providerStatus.gemini, running, source, startCamera, zones]);
 
   const applyPreset = useCallback((preset: (typeof OBJECTIVE_PRESETS)[number]) => {
     setMode(preset.mode);
@@ -1764,8 +1863,16 @@ export function IndustrialVideoAnalyzer({
         ? "Browser edge is proposing live regions"
         : "Start camera to begin edge proposals";
   const recordingProgressPercent = Math.round(recordingProgress * 100);
-  const liveCommentary = liveTranscript[0] ?? (liveRunning ? "Live edge is watching the current camera view." : null);
-  const displayHeadline = analysis?.headline ?? (liveRunning ? "Live edge camera is running" : "Point camera or upload a clip. Ask anything.");
+  const latestGeminiCommentary = liveGeminiInsight ?? liveTranscript.find((item) => item.startsWith("Gemini:"));
+  const liveCommentary = latestGeminiCommentary ?? (liveRunning ? "Gemini is reading selected live snapshots." : null);
+  const primaryLiveFeedItems = latestGeminiCommentary
+    ? [latestGeminiCommentary]
+    : liveTranscript.filter((item) => !item.startsWith("Edge frame:")).slice(0, 1);
+  const liveCostLabel = liveUsage.requests ? formatCost(liveUsage.costUsd) : "$0.0000";
+  const displayedCloudFrames = liveUsage.requests ? liveUsage.frames : analysis?.edgeAssessment.framesAnalyzed ?? (lastFrames.length || "--");
+  const displayedLatency = liveUsage.requests ? `${liveUsage.lastLatencyMs}ms` : analysis ? `${analysis.usage.latencyMs}ms` : "--";
+  const displayedCost = liveUsage.requests ? liveCostLabel : analysis ? formatCost(analysis.usage.estimatedCostUsd) : "$0.0000";
+  const displayHeadline = analysis?.headline ?? (liveRunning ? "Gemini live commentary is running" : "Point camera or upload a clip. Ask anything.");
   const displayCommentary =
     analysis?.commentary ??
     liveCommentary ??
@@ -1938,6 +2045,43 @@ export function IndustrialVideoAnalyzer({
               ) : null}
             </div>
 
+            <div className={`gemini-live-card primary-live-card ${liveRunning ? "active" : ""}`} aria-label="Gemini live camera feedback">
+              <div className="gemini-live-topline">
+                <div>
+                  <span>Live feedback</span>
+                  <strong>{liveRunning ? "Camera is live. Edge boxes stay local; selected snapshots go to Gemini." : "Start camera + Gemini commentary"}</strong>
+                </div>
+                <small>{liveFrameCount} edge / {liveUsage.requests} cloud</small>
+              </div>
+              <div className="gemini-live-actions">
+                <button disabled={liveRunning} onClick={() => void startGeminiLive()} type="button">
+                  <Radar size={16} /> Start Gemini Live
+                </button>
+                <button disabled={!liveRunning} onClick={stopGeminiLive} type="button">
+                  <Pause size={16} /> Stop Live
+                </button>
+              </div>
+              <div className="gemini-live-feed" aria-live="polite">
+                <strong>{liveStatus}</strong>
+                {(primaryLiveFeedItems.length ? primaryLiveFeedItems : ["Press Start Gemini Live. The camera opens here, edge boxes update locally, and Gemini comments on selected live snapshots."]).map((item) => (
+                  <p key={item}>{item}</p>
+                ))}
+                <div className="gemini-live-usage" aria-label="Live Gemini usage">
+                  <span><strong>{liveCostLabel}</strong> total cost</span>
+                  <span><strong>{liveUsage.requests}</strong> Gemini call{liveUsage.requests === 1 ? "" : "s"}</span>
+                  <span><strong>{liveUsage.frames}</strong> cloud frame{liveUsage.frames === 1 ? "" : "s"}</span>
+                  <span><strong>{liveUsage.lastLatencyMs || "--"}</strong>{liveUsage.lastLatencyMs ? "ms latest" : " latency"}</span>
+                </div>
+                {liveEvents.some((item) => item.startsWith("Cloud")) ? (
+                  <div className="gemini-live-events">
+                    {liveEvents.filter((item) => item.startsWith("Cloud")).slice(0, 1).map((item) => (
+                      <small key={item}>{item}</small>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
             <motion.div className="hybrid-pipeline-strip" aria-label="Hybrid edge and cloud pipeline" layout transition={springTransition}>
               <motion.div className={running ? "active" : ""} layout transition={springTransition}>
                 <span>Local edge</span>
@@ -2001,15 +2145,15 @@ export function IndustrialVideoAnalyzer({
                 </div>
                 <div>
                   <span>Cloud frames</span>
-                  <strong>{analysis?.edgeAssessment.framesAnalyzed ?? (lastFrames.length || "--")}</strong>
+                  <strong>{displayedCloudFrames}</strong>
                 </div>
                 <div>
                   <span>Latency</span>
-                  <strong>{analysis ? `${analysis.usage.latencyMs}ms` : "--"}</strong>
+                  <strong>{displayedLatency}</strong>
                 </div>
                 <div>
-                  <span>Cost</span>
-                  <strong>{analysis ? formatCost(analysis.usage.estimatedCostUsd) : "$0.0000"}</strong>
+                  <span>{liveUsage.requests ? "Live cost" : "Cost"}</span>
+                  <strong>{displayedCost}</strong>
                 </div>
               </div>
               <div className="object-chip-row detected-object-row" aria-label="Detected objects">
@@ -2023,7 +2167,7 @@ export function IndustrialVideoAnalyzer({
                 <small>{detectorStatus}. {edgeMetadataDetail}. {edgeGateDetail}</small>
               </div>
               <AnimatePresence>
-              {evidenceFrame ? (
+              {evidenceFrame && !liveRunning ? (
                 <motion.div className="evidence-frame-panel" aria-label="Evidence frame with detections" layout initial={prefersReducedMotion ? false : { opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }} transition={springTransition}>
                   <div className="evidence-frame-topline">
                     <span>Evidence frame</span>
@@ -2045,7 +2189,7 @@ export function IndustrialVideoAnalyzer({
               ) : null}
               </AnimatePresence>
               <AnimatePresence>
-              {analysis ? (
+              {analysis && !liveRunning ? (
                 <motion.div className="full-response-panel" layout initial={prefersReducedMotion ? false : { opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 12 }} transition={springTransition}>
                   <div className="response-section">
                     <span>Full response</span>
@@ -2134,37 +2278,6 @@ export function IndustrialVideoAnalyzer({
                 <Pause size={16} />
                 <span>{holdRecording ? "Cancel" : "Stop"}</span>
               </button>
-            </div>
-
-            <div className={`gemini-live-card ${liveRunning ? "active" : ""}`}>
-              <div className="gemini-live-topline">
-                <div>
-                  <span>Live edge camera</span>
-                  <strong>{liveRunning ? "Local edge stream running" : "Start live local stream"}</strong>
-                </div>
-                <small>{liveFrameCount} frame{liveFrameCount === 1 ? "" : "s"}</small>
-              </div>
-              <div className="gemini-live-actions">
-                <button disabled={liveRunning} onClick={() => void startGeminiLive()} type="button">
-                  <Radar size={16} /> Start Live Edge
-                </button>
-                <button disabled={!liveRunning} onClick={stopGeminiLive} type="button">
-                  <Pause size={16} /> Stop Live
-                </button>
-              </div>
-              <div className="gemini-live-feed" aria-live="polite">
-                <strong>{liveStatus}</strong>
-                {(liveTranscript.length ? liveTranscript : ["Start Live Edge to open the camera, draw live boxes, and collect local evidence. Use Send selected frames to cloud for Gemini/OpenAI reasoning."]).map((item) => (
-                  <p key={item}>{item}</p>
-                ))}
-                {liveEvents.length ? (
-                  <div className="gemini-live-events">
-                    {liveEvents.map((item) => (
-                      <small key={item}>{item}</small>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
             </div>
 
             <div className="sample-strip primary-samples" aria-label="Quick demo clips">

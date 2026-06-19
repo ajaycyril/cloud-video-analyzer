@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { selectEdgeTriggeredFrames } from "@/lib/edgeFrameGate";
 import { analyzeVideo } from "@/lib/videoProviders";
 import { videoAnalysisRequestSchema } from "@/lib/videoSchema";
+import type { ProviderId } from "@/lib/videoSchema";
 
 export const runtime = "nodejs";
 
@@ -87,6 +88,16 @@ function modelErrorCode(message: string): string {
   return "MODEL_REQUEST_FAILED";
 }
 
+function fallbackProvider(provider: ProviderId): ProviderId | null {
+  if (provider !== "openai" && process.env.OPENAI_API_KEY) {
+    return "openai";
+  }
+  if (provider !== "gemini" && process.env.GEMINI_API_KEY) {
+    return "gemini";
+  }
+  return null;
+}
+
 export async function POST(request: Request) {
   if (!checkRateLimit(request)) {
     return typedError("RATE_LIMITED", "Demo request limit reached. Wait briefly before analyzing again.", 429);
@@ -114,31 +125,58 @@ export async function POST(request: Request) {
     return typedError("EDGE_GATE_NO_TRIGGER", "Browser edge gate found no object or motion frames. Enable force cloud analysis to send the best sampled frames anyway.", 422);
   }
 
-  try {
-    const analysis = await analyzeVideo({
-      ...parsed.data,
-      frames: cloudFrames,
-      sampling: {
-        ...parsed.data.sampling,
-        edgeGate: {
-          strategy: edgeSelection.summary.strategy,
-          inputFrames: edgeSelection.summary.inputFrames,
-          selectedFrames: edgeSelection.summary.selectedFrames,
-          skippedFrames: edgeSelection.summary.skippedFrames,
-          objectFrames: edgeSelection.summary.objectFrames,
-          motionFrames: edgeSelection.summary.motionFrames,
-          staticFrames: edgeSelection.summary.staticFrames,
-        },
+  const analysisRequest = {
+    ...parsed.data,
+    frames: cloudFrames,
+    sampling: {
+      ...parsed.data.sampling,
+      edgeGate: {
+        strategy: edgeSelection.summary.strategy,
+        inputFrames: edgeSelection.summary.inputFrames,
+        selectedFrames: edgeSelection.summary.selectedFrames,
+        skippedFrames: edgeSelection.summary.skippedFrames,
+        objectFrames: edgeSelection.summary.objectFrames,
+        motionFrames: edgeSelection.summary.motionFrames,
+        staticFrames: edgeSelection.summary.staticFrames,
       },
-    });
+    },
+  };
+
+  try {
+    const analysis = await analyzeVideo(analysisRequest);
     return NextResponse.json(analysis);
   } catch (error) {
     const message = error instanceof Error ? error.message : "MODEL_REQUEST_FAILED";
+    const alternateProvider = fallbackProvider(parsed.data.provider);
+    if (alternateProvider) {
+      try {
+        const analysis = await analyzeVideo({
+          ...analysisRequest,
+          provider: alternateProvider,
+        });
+        return NextResponse.json(analysis, {
+          headers: {
+            "x-video-provider-failover": `${parsed.data.provider}->${alternateProvider}`,
+          },
+        });
+      } catch (failoverError) {
+        console.warn("video analysis provider failover error", {
+          provider: parsed.data.provider,
+          failoverProvider: alternateProvider,
+          mode: parsed.data.mode,
+          source: parsed.data.source,
+          frames: cloudFrames.length,
+          originalCode: modelErrorCode(message),
+          failoverCode: modelErrorCode(failoverError instanceof Error ? failoverError.message : "MODEL_REQUEST_FAILED"),
+        });
+      }
+    }
+
     console.warn("video analysis provider error", {
       provider: parsed.data.provider,
       mode: parsed.data.mode,
       source: parsed.data.source,
-      frames: cloudFrames.length,
+      frames: cloudFrames,
       code: modelErrorCode(message),
     });
     return typedError("MODEL_REQUEST_FAILED", publicModelError(message), 502);

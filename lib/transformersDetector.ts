@@ -14,7 +14,7 @@ type DetectorRuntime = {
 
 type DetectionPipeline = (input: string, options?: { threshold?: number; percentage?: boolean }) => Promise<unknown[]>;
 type TransformersModule = {
-  pipeline: (task: "object-detection", model: string, options: { device: "webgpu" | "wasm" }) => Promise<DetectionPipeline>;
+  pipeline: (task: "object-detection", model: string, options: { device: "webgpu" }) => Promise<DetectionPipeline>;
 };
 
 let detectorPromise: Promise<DetectionPipeline> | null = null;
@@ -28,6 +28,23 @@ let runtime: DetectorRuntime = {
 
 function hasWebGpu(): boolean {
   return typeof navigator !== "undefined" && Boolean((navigator as Navigator & { gpu?: unknown }).gpu);
+}
+
+function isMobileBrowser(): boolean {
+  if (typeof navigator === "undefined") {
+    return true;
+  }
+  return /android|iphone|ipad|ipod/i.test(navigator.userAgent);
+}
+
+export function shouldUseTransformersDetector(): boolean {
+  if (typeof navigator === "undefined" || !hasWebGpu() || isMobileBrowser()) {
+    return false;
+  }
+  const nav = navigator as Navigator & { deviceMemory?: number };
+  const enoughMemory = typeof nav.deviceMemory !== "number" || nav.deviceMemory >= 4;
+  const enoughCores = typeof navigator.hardwareConcurrency !== "number" || navigator.hardwareConcurrency >= 4;
+  return enoughMemory && enoughCores;
 }
 
 function normalizedBox(value: unknown): Pick<LocalDetection, "x" | "y" | "w" | "h"> | null {
@@ -93,13 +110,16 @@ function timeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
 async function createDetector(): Promise<DetectionPipeline> {
   if (!detectorPromise) {
     detectorPromise = (async () => {
-      const device = hasWebGpu() ? "webgpu" : "wasm";
+      if (!shouldUseTransformersDetector()) {
+        throw new Error("Transformers.js WebGPU detector disabled for this device.");
+      }
+      const device = "webgpu";
       runtime = {
         available: true,
         ready: false,
         loading: true,
         device,
-        label: device === "webgpu" ? "Transformers.js WebGPU detector warming" : "Transformers.js WASM detector warming",
+        label: "Transformers.js WebGPU detector warming",
       };
       const transformers = (await import("@huggingface/transformers")) as unknown as TransformersModule;
       const detector = await transformers.pipeline("object-detection", MODEL_ID, { device });
@@ -108,7 +128,7 @@ async function createDetector(): Promise<DetectionPipeline> {
         ready: true,
         loading: false,
         device,
-        label: device === "webgpu" ? "Transformers.js WebGPU detector ready" : "Transformers.js WASM detector ready",
+        label: "Transformers.js WebGPU detector ready",
       };
       return detector;
     })().catch((error) => {
@@ -131,7 +151,7 @@ export function getTransformersDetectorRuntime(): DetectorRuntime {
 }
 
 export async function detectObjectsWithTransformers(imageDataUrl: string, timeoutMs = 1400): Promise<LocalDetection[]> {
-  if (typeof window === "undefined") {
+  if (typeof window === "undefined" || !shouldUseTransformersDetector()) {
     return [];
   }
   const detector = await timeout(createDetector(), timeoutMs);

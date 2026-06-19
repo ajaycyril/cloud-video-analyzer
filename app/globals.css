@@ -1054,11 +1054,11 @@ h3 {
 }
 
 .live-camera-frame video {
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .industrial-video-frame.portrait-video {
-  height: clamp(360px, 48svh, 560px);
+  height: clamp(300px, 42svh, 520px);
 }
 
 .analysis-annotation-overlay {
@@ -1536,17 +1536,50 @@ h3 {
 }
 
 .gemini-live-card {
-  background: linear-gradient(180deg, rgba(11, 120, 168, 0.08), rgba(255, 255, 255, 0.92));
-  border: 1px solid rgba(11, 120, 168, 0.18);
+  background: linear-gradient(180deg, rgba(11, 120, 168, 0.12), rgba(255, 255, 255, 0.94));
+  border: 1px solid rgba(11, 120, 168, 0.24);
   border-radius: 16px;
   display: grid;
   gap: 8px;
   padding: 10px;
 }
 
+.primary-live-card {
+  background: linear-gradient(135deg, rgba(11, 120, 168, 0.14), #ffffff 48%, rgba(17, 131, 75, 0.1));
+  border-color: rgba(11, 120, 168, 0.28);
+  box-shadow: 0 12px 30px rgba(16, 32, 25, 0.08);
+  grid-template-columns: minmax(0, 1fr) minmax(190px, 0.8fr);
+  padding: 9px;
+}
+
+.primary-live-card .gemini-live-topline {
+  align-self: start;
+  display: grid;
+  justify-content: stretch;
+}
+
+.primary-live-card .gemini-live-topline small {
+  justify-self: start;
+}
+
+.primary-live-card .gemini-live-actions {
+  align-self: start;
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.primary-live-card .gemini-live-feed {
+  grid-column: 1 / -1;
+  max-height: 118px;
+}
+
+.primary-live-card .gemini-live-feed > strong {
+  color: var(--blue);
+}
+
 .gemini-live-card.active {
   border-color: rgba(17, 131, 75, 0.34);
-  box-shadow: 0 14px 34px rgba(17, 131, 75, 0.1);
+  box-shadow: 0 14px 34px rgba(17, 131, 75, 0.1), inset 0 0 0 1px rgba(255, 255, 255, 0.72);
 }
 
 .gemini-live-topline,
@@ -1603,20 +1636,20 @@ h3 {
   border-radius: 12px;
   display: grid;
   gap: 5px;
-  max-height: 154px;
+  max-height: 210px;
   overflow: auto;
   padding: 9px;
 }
 
 .gemini-live-feed > strong {
   color: var(--text);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .gemini-live-feed p {
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.35;
+  font-size: 13px;
+  line-height: 1.4;
   margin: 0;
 }
 
@@ -1624,6 +1657,34 @@ h3 {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
+}
+
+.gemini-live-usage {
+  display: grid;
+  gap: 5px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.gemini-live-usage span {
+  background: rgba(238, 244, 241, 0.86);
+  border: 1px solid rgba(16, 32, 25, 0.07);
+  border-radius: 10px;
+  color: var(--muted);
+  display: grid;
+  font-size: 10px;
+  font-weight: 750;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px;
+}
+
+.gemini-live-usage strong {
+  color: var(--text);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .gemini-live-events small {
@@ -3122,14 +3183,11 @@ h3 {
     width: 100%;
   }
 
-  .industrial-video-frame.portrait-video.live-camera-frame {
-    height: clamp(238px, 40svh, 292px);
-    max-height: 292px;
-  }
-
-  .industrial-video-frame.landscape-video.live-camera-frame {
-    height: clamp(172px, 27svh, 210px);
-    max-height: 210px;
+  .industrial-video-frame.portrait-video.live-camera-frame,
+  .industrial-video-frame.landscape-video.live-camera-frame,
+  .industrial-video-frame.live-camera-frame {
+    height: clamp(220px, 32svh, 270px);
+    max-height: 270px;
   }
 
   .first-fold-console {
@@ -3437,6 +3495,22 @@ h3 {
     padding: 7px;
   }
 
+  .primary-live-card {
+    grid-template-columns: 1fr;
+    padding: 7px;
+  }
+
+  .primary-live-card .gemini-live-topline {
+    align-items: center;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .primary-live-card .gemini-live-actions {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
   .gemini-live-topline strong {
     font-size: 12px;
   }
@@ -3446,17 +3520,34 @@ h3 {
   }
 
   .gemini-live-feed {
-    max-height: 82px;
+    max-height: 130px;
     padding: 7px;
+  }
+
+  .primary-live-card .gemini-live-feed {
+    max-height: 132px;
   }
 
   .gemini-live-feed p {
     display: -webkit-box;
-    font-size: 11px;
-    line-clamp: 2;
-    -webkit-line-clamp: 2;
+    font-size: 12px;
+    line-clamp: 3;
+    -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
+  }
+
+  .gemini-live-usage {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gemini-live-usage span {
+    font-size: 9px;
+    padding: 5px;
+  }
+
+  .gemini-live-usage strong {
+    font-size: 11px;
   }
 
   .capture-disclosure {
