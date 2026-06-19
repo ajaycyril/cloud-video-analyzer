@@ -55,25 +55,14 @@ export async function createObjectDetector(): Promise<ObjectDetector> {
         throw new Error("Edge object detection model missing at /models/efficientdet_lite0.tflite.");
       }
 
-      try {
-        const gpuDetector = await createDetectorWithDelegate("GPU");
-        detectorRuntime = {
-          ready: true,
-          delegate: "GPU",
-          webGpuAvailable,
-          label: webGpuAvailable ? "Browser detector active: GPU delegate, WebGPU available" : "Browser detector active: GPU delegate",
-        };
-        return gpuDetector;
-      } catch {
-        const cpuDetector = await createDetectorWithDelegate("CPU");
-        detectorRuntime = {
-          ready: true,
-          delegate: "CPU",
-          webGpuAvailable,
-          label: webGpuAvailable ? "Browser detector active: CPU fallback, WebGPU available" : "Browser detector active: CPU fallback",
-        };
-        return cpuDetector;
-      }
+      const cpuDetector = await createDetectorWithDelegate("CPU");
+      detectorRuntime = {
+        ready: true,
+        delegate: "CPU",
+        webGpuAvailable,
+        label: webGpuAvailable ? "Browser edge detector active; WebGPU available" : "Browser edge detector active",
+      };
+      return cpuDetector;
     })().catch((error) => {
       detectorPromise = null;
       detectorRuntime = {

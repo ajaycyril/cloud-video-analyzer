@@ -186,6 +186,28 @@ function mergeDetections(current: LocalDetection[], additions: LocalDetection[])
     .slice(0, 20);
 }
 
+function safelySetPointerCapture(element: Element, pointerId: number): void {
+  if ("setPointerCapture" in element) {
+    try {
+      element.setPointerCapture(pointerId);
+    } catch {
+      // Pointer capture can fail if the browser already ended the touch sequence.
+    }
+  }
+}
+
+function safelyReleasePointerCapture(element: Element, pointerId: number): void {
+  if ("hasPointerCapture" in element && "releasePointerCapture" in element) {
+    try {
+      if (element.hasPointerCapture(pointerId)) {
+        element.releasePointerCapture(pointerId);
+      }
+    } catch {
+      // Releasing stale capture should never break the capture/analyze flow.
+    }
+  }
+}
+
 function addRecent(items: string[], next: string, limit = 6): string[] {
   const trimmed = next.trim();
   if (!trimmed) {
@@ -779,7 +801,7 @@ export function IndustrialVideoAnalyzer({
       return;
     }
     if (event) {
-      event.currentTarget.setPointerCapture(event.pointerId);
+      safelySetPointerCapture(event.currentTarget, event.pointerId);
     }
     setError(null);
     setAnalysis(null);
@@ -833,11 +855,13 @@ export function IndustrialVideoAnalyzer({
       const frames = holdRecordingRef.current.frames;
       holdRecordingRef.current.active = false;
       holdRecordingRef.current.stopRequested = false;
+      holdRecordingRef.current.pointerId = null;
       setHoldRecording(false);
       await submitFramesForAnalysis(frames);
     } catch (recordError) {
       holdRecordingRef.current.active = false;
       holdRecordingRef.current.stopRequested = false;
+      holdRecordingRef.current.pointerId = null;
       setHoldRecording(false);
       setError(readableError(recordError));
       setStatus("analysis error");
@@ -847,13 +871,14 @@ export function IndustrialVideoAnalyzer({
   }, [analyzing, captureOneFrame, running, source, startCamera, submitFramesForAnalysis]);
 
   const finishHoldRecording = useCallback((event?: PointerEvent<HTMLButtonElement>) => {
-    if (event && event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
+    if (event) {
+      safelyReleasePointerCapture(event.currentTarget, event.pointerId);
     }
     if (!holdRecordingRef.current.active) {
       return;
     }
     holdRecordingRef.current.stopRequested = true;
+    holdRecordingRef.current.pointerId = null;
     setStatus("recording stopped - preparing cloud request");
   }, []);
 
@@ -1205,6 +1230,8 @@ export function IndustrialVideoAnalyzer({
   const resultStatus = analysis ? "Scene result" : analyzing ? "Analyzing scene" : "Ready for scene result";
   const evidenceFrame = lastFrames.find((frame) => frame.localDetections.length > 0) ?? lastFrames[0] ?? null;
   const evidenceDetections = evidenceFrame?.localDetections.slice(0, 8) ?? [];
+  const liveOverlayFrame = lastFrames.length ? lastFrames[lastFrames.length - 1] : null;
+  const liveOverlayDetections = liveOverlayFrame?.localDetections.slice(0, 8) ?? [];
   const edgeGateLabel = edgeGateSummary
     ? `${edgeGateSummary.selectedFrames}/${edgeGateSummary.inputFrames} sent`
     : "waiting";
@@ -1241,6 +1268,24 @@ export function IndustrialVideoAnalyzer({
             ref={videoFrameRef}
           >
             <video muted onLoadedMetadata={updateVideoOrientation} onResize={updateVideoOrientation} playsInline ref={videoRef} />
+            {liveOverlayDetections.length ? (
+              <div className="live-detection-overlay" aria-label="Browser edge detection overlay">
+                {liveOverlayDetections.map((detection, index) => (
+                  <div
+                    className="live-detection-box"
+                    key={`${detection.label}-${index}-${detection.x}-${detection.y}`}
+                    style={{
+                      left: `${detection.x * 100}%`,
+                      top: `${detection.y * 100}%`,
+                      width: `${detection.w * 100}%`,
+                      height: `${detection.h * 100}%`,
+                    }}
+                  >
+                    <span>{detection.label} {Math.round(detection.score * 100)}%</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <div className={`video-processing-badge ${analyzing ? "active" : analysis ? "ready" : ""}`}>
               <strong>{videoProcessingTitle}</strong>
               <span>{videoProcessingDetail}</span>

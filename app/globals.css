@@ -912,6 +912,39 @@ h3 {
   width: 100%;
 }
 
+.live-detection-overlay {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 2;
+}
+
+.live-detection-box {
+  border: 2px solid #19c37d;
+  border-radius: 7px;
+  box-shadow: 0 0 0 1px rgba(2, 23, 14, 0.45), 0 8px 22px rgba(0, 0, 0, 0.26);
+  min-height: 18px;
+  min-width: 22px;
+  position: absolute;
+}
+
+.live-detection-box span {
+  background: #19c37d;
+  border-radius: 999px;
+  color: #06140d;
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 900;
+  left: -2px;
+  max-width: 160px;
+  overflow: hidden;
+  padding: 2px 7px;
+  position: absolute;
+  text-overflow: ellipsis;
+  top: -22px;
+  white-space: nowrap;
+}
+
 .live-camera-frame video {
   object-fit: cover;
 }
