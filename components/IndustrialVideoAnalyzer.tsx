@@ -7,7 +7,7 @@ import { buildVideoConstraints, listVideoInputDevices, stopStream, type CameraFa
 import { selectEdgeTriggeredFrames, type EdgeGateSummary } from "@/lib/edgeFrameGate";
 import { canvasToJpegDataUrl, captureVideoFrame, computeEdgeMetrics, type EdgeMetricResult } from "@/lib/edgeMetrics";
 import { summarizeHybridEdgeContext } from "@/lib/hybridEdgeContext";
-import { detectObjectsForVideo, tryCreateObjectDetector } from "@/lib/mediaPipeDetector";
+import { detectObjectsForVideo, getObjectDetectorRuntime, tryCreateObjectDetector } from "@/lib/mediaPipeDetector";
 import { fallbackObjectChips, summarizeEdgeDetections } from "@/lib/resultPresentation";
 import type { LocalDetection } from "@/lib/types";
 import type { ProviderId, SampledFrame, VideoAnalysisResponse, VideoMode, VideoSource, Zone } from "@/lib/videoSchema";
@@ -43,6 +43,12 @@ type HoldRecording = {
   startedAt: number;
 };
 
+type MotionSnapshot = {
+  width: number;
+  height: number;
+  cells: Uint8Array;
+};
+
 const MAX_FRAMES = 5;
 const MAX_CLOUD_FRAMES = 3;
 const CAMERA_CAPTURE_WINDOW_MS = 2000;
@@ -52,6 +58,9 @@ const SMART_RECORDING_MAX_MS = 4200;
 const SMART_RECORDING_INTERVAL_MS = 360;
 const EDGE_MOTION_TRIGGER_SCORE = 8;
 const EDGE_OBJECT_TRIGGER_SCORE = 0.5;
+const MOTION_GRID_COLUMNS = 12;
+const MOTION_GRID_ROWS = 8;
+const MOTION_CELL_TRIGGER = 26;
 const JPEG_QUALITY = 0.58;
 const DEMO_ANALYSIS_LIMIT = Number(process.env.NEXT_PUBLIC_DEMO_ANALYSIS_LIMIT ?? 20);
 
@@ -230,6 +239,75 @@ function overlayStyleForDetection(detection: LocalDetection, viewport: VideoView
   };
 }
 
+function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapshot | null): {
+  snapshot: MotionSnapshot;
+  detections: LocalDetection[];
+} {
+  const { data, width, height } = imageData;
+  const sums = new Uint32Array(MOTION_GRID_COLUMNS * MOTION_GRID_ROWS);
+  const cells = new Uint8Array(MOTION_GRID_COLUMNS * MOTION_GRID_ROWS);
+  const counts = new Uint16Array(cells.length);
+
+  for (let y = 0; y < height; y += 3) {
+    for (let x = 0; x < width; x += 3) {
+      const pixelIndex = y * width + x;
+      const offset = pixelIndex * 4;
+      const lum = Math.round(0.2126 * data[offset] + 0.7152 * data[offset + 1] + 0.0722 * data[offset + 2]);
+      const gridX = Math.min(MOTION_GRID_COLUMNS - 1, Math.floor((x / width) * MOTION_GRID_COLUMNS));
+      const gridY = Math.min(MOTION_GRID_ROWS - 1, Math.floor((y / height) * MOTION_GRID_ROWS));
+      const cellIndex = gridY * MOTION_GRID_COLUMNS + gridX;
+      sums[cellIndex] += lum;
+      counts[cellIndex] += 1;
+    }
+  }
+
+  for (let index = 0; index < cells.length; index += 1) {
+    cells[index] = counts[index] ? Math.round(sums[index] / counts[index]) : 0;
+  }
+
+  const snapshot = { width, height, cells };
+  if (!previous || previous.width !== width || previous.height !== height) {
+    return { snapshot, detections: [] };
+  }
+
+  const changedCells: Array<{ x: number; y: number; diff: number }> = [];
+  for (let index = 0; index < cells.length; index += 1) {
+    const diff = Math.abs(cells[index] - previous.cells[index]);
+    if (diff >= MOTION_CELL_TRIGGER) {
+      changedCells.push({
+        x: index % MOTION_GRID_COLUMNS,
+        y: Math.floor(index / MOTION_GRID_COLUMNS),
+        diff,
+      });
+    }
+  }
+
+  if (!changedCells.length) {
+    return { snapshot, detections: [] };
+  }
+
+  const minX = Math.min(...changedCells.map((cell) => cell.x));
+  const minY = Math.min(...changedCells.map((cell) => cell.y));
+  const maxX = Math.max(...changedCells.map((cell) => cell.x));
+  const maxY = Math.max(...changedCells.map((cell) => cell.y));
+  const avgDiff = changedCells.reduce((sum, cell) => sum + cell.diff, 0) / changedCells.length;
+  const coverage = changedCells.length / cells.length;
+
+  return {
+    snapshot,
+    detections: [
+      {
+        label: "motion region",
+        score: Math.max(0.45, Math.min(0.94, avgDiff / 90 + coverage)),
+        x: Math.max(0, minX / MOTION_GRID_COLUMNS),
+        y: Math.max(0, minY / MOTION_GRID_ROWS),
+        w: Math.min(1, (maxX - minX + 1) / MOTION_GRID_COLUMNS),
+        h: Math.min(1, (maxY - minY + 1) / MOTION_GRID_ROWS),
+      },
+    ],
+  };
+}
+
 function addRecent(items: string[], next: string, limit = 6): string[] {
   const trimmed = next.trim();
   if (!trimmed) {
@@ -352,6 +430,7 @@ export function IndustrialVideoAnalyzer({
   const previewDetectionBusyRef = useRef(false);
   const lastPreviewDetectionAtRef = useRef(0);
   const latestPreviewDetectionsRef = useRef<LocalDetection[]>([]);
+  const motionSnapshotRef = useRef<MotionSnapshot | null>(null);
   const previousFrameRef = useRef<EdgeMetricResult["snapshot"] | null>(null);
   const zoneInteractionRef = useRef<ZoneInteraction | null>(null);
   const holdRecordingRef = useRef<HoldRecording>({
@@ -536,6 +615,7 @@ export function IndustrialVideoAnalyzer({
       updateVideoOrientation();
       await refreshDevices();
       previousFrameRef.current = null;
+      motionSnapshotRef.current = null;
       setEdgePreviewMetrics(null);
       setEdgePreviewFrameCount(0);
       setEdgeDetectionLatencyMs(0);
@@ -567,6 +647,7 @@ export function IndustrialVideoAnalyzer({
     setRunning(false);
     setPreviewDetections([]);
     latestPreviewDetectionsRef.current = [];
+    motionSnapshotRef.current = null;
     setEdgePreviewMetrics(null);
     setEdgePreviewFrameCount(0);
     setEdgeDetectionLatencyMs(0);
@@ -586,9 +667,9 @@ export function IndustrialVideoAnalyzer({
     }
     previewDetectionBusyRef.current = false;
 
-    if (source !== "camera" || !running || liveRunning) {
-      setPreviewDetections([]);
+    if (source !== "camera" || !running) {
       latestPreviewDetectionsRef.current = [];
+      motionSnapshotRef.current = null;
       return;
     }
 
@@ -605,33 +686,61 @@ export function IndustrialVideoAnalyzer({
       }
       previewDetectionBusyRef.current = true;
       const detectionStartedAt = performance.now();
+      let motionDetections: LocalDetection[] = [];
       try {
-        const runtime = await tryCreateObjectDetector();
-        if (!cancelled) {
-          setDetectorStatus(runtime.label);
-        }
         const canvas = canvasRef.current;
         if (canvas) {
           const imageData = captureVideoFrame(video, canvas, 360);
           if (imageData) {
             const result = computeEdgeMetrics(imageData, previousFrameRef.current);
+            const motionResult = buildMotionCandidateBoxes(imageData, motionSnapshotRef.current);
             previousFrameRef.current = result.snapshot;
+            motionSnapshotRef.current = motionResult.snapshot;
+            motionDetections = motionResult.detections;
             if (!cancelled) {
               setEdgePreviewMetrics(result.metrics);
               setEdgePreviewFrameCount((count) => count + 1);
+              if (motionDetections.length) {
+                setPreviewDetections(motionDetections);
+                latestPreviewDetectionsRef.current = motionDetections;
+                updateVideoViewport();
+              } else if (!getObjectDetectorRuntime().ready) {
+                setPreviewDetections([]);
+                latestPreviewDetectionsRef.current = [];
+              }
             }
           }
         }
+        const runtime = getObjectDetectorRuntime();
+        if (!runtime.ready) {
+          void tryCreateObjectDetector().then((nextRuntime) => {
+            if (!cancelled) {
+              setDetectorStatus(nextRuntime.label);
+            }
+          });
+          if (!cancelled) {
+            setDetectorStatus(motionDetections.length ? "Instant motion edge active; object model warming" : runtime.label);
+            setEdgeDetectionLatencyMs(Math.round(performance.now() - detectionStartedAt));
+          }
+          return;
+        }
+        setDetectorStatus(runtime.label);
         const detections = await detectObjectsForVideo(video, now);
         if (!cancelled) {
-          setPreviewDetections(detections);
-          latestPreviewDetectionsRef.current = detections;
+          const nextDetections = detections.length ? detections : motionDetections;
+          setPreviewDetections(nextDetections);
+          latestPreviewDetectionsRef.current = nextDetections;
           setEdgeDetectionLatencyMs(Math.round(performance.now() - detectionStartedAt));
           updateVideoViewport();
         }
       } catch {
         if (!cancelled) {
-          setDetectorStatus("Browser edge detector unavailable");
+          if (motionDetections.length) {
+            setPreviewDetections(motionDetections);
+            latestPreviewDetectionsRef.current = motionDetections;
+            updateVideoViewport();
+          }
+          setDetectorStatus("Motion edge active; object model still loading");
         }
       } finally {
         previewDetectionBusyRef.current = false;
@@ -667,7 +776,7 @@ export function IndustrialVideoAnalyzer({
       }
       previewDetectionBusyRef.current = false;
     };
-  }, [liveRunning, running, source, updateVideoViewport]);
+  }, [running, source, updateVideoViewport]);
 
   const switchCamera = useCallback(async () => {
     const nextFacing: CameraFacing = cameraFacing === "environment" ? "user" : "environment";
@@ -693,6 +802,7 @@ export function IndustrialVideoAnalyzer({
       setSource("file");
       setPreviewDetections([]);
       latestPreviewDetectionsRef.current = [];
+      motionSnapshotRef.current = null;
       setEdgePreviewMetrics(null);
       setEdgePreviewFrameCount(0);
       setEdgeDetectionLatencyMs(0);
@@ -723,6 +833,7 @@ export function IndustrialVideoAnalyzer({
     setSource("sample");
     setPreviewDetections([]);
     latestPreviewDetectionsRef.current = [];
+    motionSnapshotRef.current = null;
     setEdgePreviewMetrics(null);
     setEdgePreviewFrameCount(0);
     setEdgeDetectionLatencyMs(0);
@@ -751,6 +862,7 @@ export function IndustrialVideoAnalyzer({
       setSource("sample");
       setPreviewDetections([]);
       latestPreviewDetectionsRef.current = [];
+      motionSnapshotRef.current = null;
       setEdgePreviewMetrics(null);
       setEdgePreviewFrameCount(0);
       setEdgeDetectionLatencyMs(0);
@@ -1133,6 +1245,7 @@ export function IndustrialVideoAnalyzer({
     setLastFrames([]);
     setPreviewDetections([]);
     latestPreviewDetectionsRef.current = [];
+    motionSnapshotRef.current = null;
     setEdgePreviewMetrics(null);
     setEdgePreviewFrameCount(0);
     setEdgeDetectionLatencyMs(0);
@@ -1163,10 +1276,45 @@ export function IndustrialVideoAnalyzer({
   }, []);
 
   const startGeminiLive = useCallback(async () => {
-    if (!providerStatus.gemini) {
-      setError("Gemini API key is required for Gemini Live.");
-      return;
-    }
+    const startLocalLiveFallback = (reason: string) => {
+      if (liveTimerRef.current) {
+        window.clearInterval(liveTimerRef.current);
+        liveTimerRef.current = null;
+      }
+      liveStreamingStartedRef.current = true;
+      liveStartedAtRef.current = performance.now();
+      setLiveRunning(true);
+      setLiveStatus("Local live edge stream active");
+      setStatus("Local live camera analytics active - press Stop Live to end");
+      setLiveTranscript((items) => addRecent(items, `${reason} Running local edge commentary with live boxes and motion gating.`));
+
+      const sendLocalFrame = async () => {
+        if (!liveStreamingStartedRef.current) {
+          return;
+        }
+        const frame = await captureOneFrame(Math.max(0, performance.now() - liveStartedAtRef.current));
+        if (!frame) {
+          return;
+        }
+        setLastFrames((frames) => [...frames, frame].slice(-MAX_FRAMES));
+        setLiveFrameCount((count) => count + 1);
+        const labels = frame.localDetections.length
+          ? frame.localDetections.slice(0, 3).map((detection) => `${detection.label} ${Math.round(detection.score * 100)}%`).join(", ")
+          : "no object boxes";
+        setLiveTranscript((items) =>
+          addRecent(
+            items,
+            `Edge frame: ${labels}; motion ${Math.round(frame.edgeMetrics.motionScore)}; ${frame.edgeMetrics.usable ? "usable for cloud" : frame.edgeMetrics.rejectionReason ?? "low quality"}.`,
+          ),
+        );
+      };
+
+      void sendLocalFrame();
+      liveTimerRef.current = window.setInterval(() => {
+        void sendLocalFrame();
+      }, 900);
+    };
+
     setError(null);
     setLiveTranscript([]);
     setLiveEvents([]);
@@ -1184,6 +1332,11 @@ export function IndustrialVideoAnalyzer({
         throw new Error("Video element is not ready.");
       }
       await waitForVideoData(video);
+
+      if (!providerStatus.gemini) {
+        startLocalLiveFallback("Gemini Live key is not configured.");
+        return;
+      }
 
       const tokenResponse = await fetch("/api/gemini-live-token", { method: "POST" });
       const tokenPayload = (await tokenResponse.json()) as { token?: string; model?: string; detail?: string; error?: string };
@@ -1289,8 +1442,10 @@ export function IndustrialVideoAnalyzer({
       };
 
       websocket.onerror = () => {
-        setLiveStatus("Gemini Live websocket error");
-        setLiveTranscript((items) => addRecent(items, "Live websocket error. Try stopping and starting Live again."));
+        websocket.onclose = null;
+        liveSocketRef.current?.close();
+        liveSocketRef.current = null;
+        startLocalLiveFallback("Gemini Live websocket failed.");
       };
 
       websocket.onclose = () => {
@@ -1304,10 +1459,7 @@ export function IndustrialVideoAnalyzer({
         setLiveStatus("Gemini Live closed");
       };
     } catch (liveError) {
-      setLiveRunning(false);
-      setLiveStatus("Gemini Live error");
-      setError(readableError(liveError));
-      setLiveTranscript((items) => addRecent(items, readableError(liveError)));
+      startLocalLiveFallback(`Gemini Live unavailable: ${readableError(liveError)}`);
     }
   }, [cameraFacing, captureOneFrame, objective, providerStatus.gemini, running, source, startCamera, zones]);
 
