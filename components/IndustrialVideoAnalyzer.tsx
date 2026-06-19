@@ -247,6 +247,8 @@ function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapsho
   const sums = new Uint32Array(MOTION_GRID_COLUMNS * MOTION_GRID_ROWS);
   const cells = new Uint8Array(MOTION_GRID_COLUMNS * MOTION_GRID_ROWS);
   const counts = new Uint16Array(cells.length);
+  const minimums = new Uint8Array(cells.length).fill(255);
+  const maximums = new Uint8Array(cells.length);
 
   for (let y = 0; y < height; y += 3) {
     for (let x = 0; x < width; x += 3) {
@@ -258,6 +260,8 @@ function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapsho
       const cellIndex = gridY * MOTION_GRID_COLUMNS + gridX;
       sums[cellIndex] += lum;
       counts[cellIndex] += 1;
+      minimums[cellIndex] = Math.min(minimums[cellIndex], lum);
+      maximums[cellIndex] = Math.max(maximums[cellIndex], lum);
     }
   }
 
@@ -266,8 +270,47 @@ function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapsho
   }
 
   const snapshot = { width, height, cells };
+  const visualCells: Array<{ x: number; y: number; range: number }> = [];
+  for (let index = 0; index < cells.length; index += 1) {
+    const range = maximums[index] - minimums[index];
+    if (range >= 42) {
+      visualCells.push({
+        x: index % MOTION_GRID_COLUMNS,
+        y: Math.floor(index / MOTION_GRID_COLUMNS),
+        range,
+      });
+    }
+  }
+
+  const visualDetection = (() => {
+    if (!visualCells.length) {
+      return {
+        label: "scene region",
+        score: 0.5,
+        x: 0.22,
+        y: 0.18,
+        w: 0.56,
+        h: 0.58,
+      };
+    }
+    const sorted = visualCells.slice().sort((left, right) => right.range - left.range).slice(0, Math.max(4, Math.ceil(visualCells.length * 0.42)));
+    const minX = Math.min(...sorted.map((cell) => cell.x));
+    const minY = Math.min(...sorted.map((cell) => cell.y));
+    const maxX = Math.max(...sorted.map((cell) => cell.x));
+    const maxY = Math.max(...sorted.map((cell) => cell.y));
+    const avgRange = sorted.reduce((sum, cell) => sum + cell.range, 0) / sorted.length;
+    return {
+      label: "edge attention",
+      score: Math.max(0.52, Math.min(0.88, avgRange / 110)),
+      x: Math.max(0, minX / MOTION_GRID_COLUMNS),
+      y: Math.max(0, minY / MOTION_GRID_ROWS),
+      w: Math.min(1, (maxX - minX + 1) / MOTION_GRID_COLUMNS),
+      h: Math.min(1, (maxY - minY + 1) / MOTION_GRID_ROWS),
+    };
+  })();
+
   if (!previous || previous.width !== width || previous.height !== height) {
-    return { snapshot, detections: [] };
+    return { snapshot, detections: [visualDetection] };
   }
 
   const changedCells: Array<{ x: number; y: number; diff: number }> = [];
@@ -283,7 +326,7 @@ function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapsho
   }
 
   if (!changedCells.length) {
-    return { snapshot, detections: [] };
+    return { snapshot, detections: [visualDetection] };
   }
 
   const minX = Math.min(...changedCells.map((cell) => cell.x));
@@ -304,6 +347,7 @@ function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapsho
         w: Math.min(1, (maxX - minX + 1) / MOTION_GRID_COLUMNS),
         h: Math.min(1, (maxY - minY + 1) / MOTION_GRID_ROWS),
       },
+      visualDetection,
     ],
   };
 }
@@ -1567,6 +1611,13 @@ export function IndustrialVideoAnalyzer({
     : hybridEdgeContext.frames
       ? `${hybridEdgeContext.detections} local box${hybridEdgeContext.detections === 1 ? "" : "es"} ready for cloud context`
       : "Edge metadata will appear while recording";
+  const hybridPipelineStatus = analysis
+    ? "Cloud enhanced the selected edge frames"
+    : hasLocalEdgeFrames
+      ? "Edge buffer is live; cloud send is ready"
+      : running
+        ? "Browser edge is proposing live regions"
+        : "Start camera to begin edge proposals";
   const recordingProgressPercent = Math.round(recordingProgress * 100);
   const liveCommentary = liveTranscript[0] ?? (liveRunning ? "Live edge is watching the current camera view." : null);
   const displayHeadline = analysis?.headline ?? (liveRunning ? "Live edge camera is running" : "Point camera, record, get the answer here");
@@ -1621,7 +1672,7 @@ export function IndustrialVideoAnalyzer({
                 <strong>{edgePreviewDecision}</strong>
               </div>
               <small>{edgeHudDetail}</small>
-              <em>{edgePreviewQuality}. Green boxes are browser edge; blue boxes are cloud-confirmed.</em>
+              <em>{edgePreviewQuality}. Green = edge proposal; blue = cloud-confirmed.</em>
             </div>
             {liveRunning && liveCommentary ? (
               <div className="live-commentary-overlay" aria-live="polite">
@@ -1705,6 +1756,22 @@ export function IndustrialVideoAnalyzer({
                   <span style={{ width: `${recordingProgressPercent}%` }} />
                 </div>
               ) : null}
+            </div>
+
+            <div className="hybrid-pipeline-strip" aria-label="Hybrid edge and cloud pipeline">
+              <div className={running ? "active" : ""}>
+                <span>1 Edge proposes</span>
+                <strong>{previewDetections.length || "--"} live box{previewDetections.length === 1 ? "" : "es"}</strong>
+              </div>
+              <div className={hasLocalEdgeFrames ? "active" : ""}>
+                <span>2 Rolling buffer</span>
+                <strong>{lastFrames.length || "--"} current frame{lastFrames.length === 1 ? "" : "s"}</strong>
+              </div>
+              <div className={analysis ? "active" : ""}>
+                <span>3 Cloud enhances</span>
+                <strong>{analysis ? `${Math.round(analysis.confidence)}%` : "manual send"}</strong>
+              </div>
+              <small>{hybridPipelineStatus}. Green boxes are local proposals; blue means cloud-confirmed.</small>
             </div>
 
             <div className={`scene-result-card ${analysis ? "ready" : analyzing ? "loading" : ""}`}>
