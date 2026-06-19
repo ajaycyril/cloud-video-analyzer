@@ -17,8 +17,15 @@ type RateLimitBucket = {
 
 const rateLimitBuckets = new Map<string, RateLimitBucket>();
 
-function typedError(error: string, detail: string, status: number) {
-  return NextResponse.json({ error, detail }, { status });
+function baseHeaders(extra: Record<string, string> = {}) {
+  return {
+    "cache-control": "no-store",
+    ...extra,
+  };
+}
+
+function typedError(error: string, detail: string, status: number, headers: Record<string, string> = {}) {
+  return NextResponse.json({ error, detail }, { status, headers: baseHeaders(headers) });
 }
 
 function clientKey(request: Request): string {
@@ -144,7 +151,12 @@ export async function POST(request: Request) {
 
   try {
     const analysis = await analyzeVideo(analysisRequest);
-    return NextResponse.json(analysis);
+    return NextResponse.json(analysis, {
+      headers: baseHeaders({
+        "x-video-provider": analysis.provider,
+        "x-video-edge-selected-frames": String(cloudFrames.length),
+      }),
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "MODEL_REQUEST_FAILED";
     const alternateProvider = fallbackProvider(parsed.data.provider);
@@ -155,9 +167,11 @@ export async function POST(request: Request) {
           provider: alternateProvider,
         });
         return NextResponse.json(analysis, {
-          headers: {
+          headers: baseHeaders({
+            "x-video-provider": analysis.provider,
             "x-video-provider-failover": `${parsed.data.provider}->${alternateProvider}`,
-          },
+            "x-video-edge-selected-frames": String(cloudFrames.length),
+          }),
         });
       } catch (failoverError) {
         console.warn("video analysis provider failover error", {
@@ -176,7 +190,7 @@ export async function POST(request: Request) {
       provider: parsed.data.provider,
       mode: parsed.data.mode,
       source: parsed.data.source,
-      frames: cloudFrames,
+      frames: cloudFrames.length,
       code: modelErrorCode(message),
     });
     return typedError("MODEL_REQUEST_FAILED", publicModelError(message), 502);

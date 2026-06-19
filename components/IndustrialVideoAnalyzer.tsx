@@ -2,7 +2,6 @@
 
 import { AlertTriangle, Camera, Crosshair, FileVideo, Pause, Play, Radar, RotateCcw } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import Image from "next/image";
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent } from "react";
 import { buildVideoConstraints, listVideoInputDevices, stopStream, type CameraFacing } from "@/lib/camera";
 import { selectEdgeTriggeredFrames, type EdgeGateSummary } from "@/lib/edgeFrameGate";
@@ -1312,13 +1311,14 @@ export function IndustrialVideoAnalyzer({
       }
 
       const nextAnalysis = payload as VideoAnalysisResponse;
+      const failover = response.headers.get("x-video-provider-failover");
       const nextUsage = analysesUsedRef.current + 1;
       analysesUsedRef.current = nextUsage;
       setAnalysesUsed(nextUsage);
       window.sessionStorage.setItem("cloud-video-analyzer-analyses-used", String(nextUsage));
       setAnalysis(nextAnalysis);
       setError(null);
-      setStatus(`${provider} analysis complete in ${nextAnalysis.usage.latencyMs}ms`);
+      setStatus(failover ? `fallback ${failover} complete in ${nextAnalysis.usage.latencyMs}ms` : `${nextAnalysis.provider} analysis complete in ${nextAnalysis.usage.latencyMs}ms`);
       return true;
     } catch (analysisError) {
       setError(readableError(analysisError));
@@ -1813,8 +1813,6 @@ export function IndustrialVideoAnalyzer({
   const actionPreview = analysis?.recommendations.slice(0, 3) ?? [];
   const objectChips = analysis?.objects.length ? fallbackObjectChips(analysis) : localObjectChips;
   const resultStatus = analysis ? "Scene result" : analyzing ? "Analyzing scene" : "Ready for scene result";
-  const evidenceFrame = lastFrames.find((frame) => frame.localDetections.length > 0) ?? lastFrames[0] ?? null;
-  const evidenceDetections = evidenceFrame ? selectDisplayDetections(evidenceFrame.localDetections, 2) : [];
   const liveOverlayFrame = lastFrames.length ? lastFrames[lastFrames.length - 1] : null;
   const liveOverlayDetections = selectDisplayDetections(source === "camera" && previewDetections.length ? previewDetections : liveOverlayFrame?.localDetections ?? [], 2);
   const hybridEdgeContext = summarizeHybridEdgeContext(lastFrames);
@@ -1850,11 +1848,6 @@ export function IndustrialVideoAnalyzer({
       ? "MediaPipe + Transformers warming"
       : "MediaPipe edge";
   const edgeHudDetail = `${edgeModelLabel} - ${previewDetections.length} box${previewDetections.length === 1 ? "" : "es"} - ${edgeLoopFps || "--"} fps - ${edgeDetectionLatencyMs || "--"}ms - frame ${edgePreviewFrameCount}`;
-  const edgeMetadataDetail = edgeGateSummary
-    ? `${hybridEdgeContext.detections} local box${hybridEdgeContext.detections === 1 ? "" : "es"} sent as metadata with ${edgeGateSummary.selectedFrames} image frame${edgeGateSummary.selectedFrames === 1 ? "" : "s"}`
-    : hybridEdgeContext.frames
-      ? `${hybridEdgeContext.detections} local box${hybridEdgeContext.detections === 1 ? "" : "es"} ready for cloud context`
-      : "Edge metadata will appear while recording";
   const recordingProgressPercent = Math.round(recordingProgress * 100);
   const latestGeminiCommentary = liveGeminiInsight ?? liveTranscript.find((item) => item.startsWith("Gemini:"));
   const liveCommentary = latestGeminiCommentary ?? (liveRunning ? "Gemini is reading selected live snapshots." : null);
@@ -2106,140 +2099,6 @@ export function IndustrialVideoAnalyzer({
                   </div>
                 ) : null}
               </div>
-            </motion.div>
-
-            <motion.div className={`scene-result-card secondary-result-card ${liveRunning ? "live-secondary" : ""} ${analysis ? "ready" : analyzing ? "loading" : ""}`} layout transition={springTransition}>
-              <div className="scene-result-topline">
-                <span>{resultStatus}</span>
-                <strong>{analysis ? `${Math.round(analysis.confidence)}% confidence` : analyzing ? "Working..." : "No cloud call yet"}</strong>
-              </div>
-              <AnimatePresence mode="popLayout">
-                <motion.h2 key={displayHeadline} layout initial={prefersReducedMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={prefersReducedMotion ? undefined : { opacity: 0, y: -8 }} transition={springTransition}>{displayHeadline}</motion.h2>
-              </AnimatePresence>
-              <p>{displayCommentary}</p>
-              <AnimatePresence>
-              {error ? (
-                <motion.div className="primary-error-banner" role="alert" initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={springTransition}>
-                  <AlertTriangle size={16} />
-                  <span>{error}</span>
-                </motion.div>
-              ) : null}
-              </AnimatePresence>
-              <div className={`priority-actions-panel ${actionPreview.length ? "ready" : ""}`} aria-label="Recommended actions">
-                <div className="priority-actions-heading">
-                  <span>Recommended actions</span>
-                  <strong>{actionPreview.length ? `${actionPreview.length} next step${actionPreview.length === 1 ? "" : "s"}` : "Waiting for analysis"}</strong>
-                </div>
-                {actionPreview.length ? (
-                  <div className="priority-action-list">
-                    {actionPreview.map((action) => (
-                      <motion.div className="priority-action-item" key={`${action.priority}-${action.action}`} layout initial={prefersReducedMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={springTransition}>
-                        <span>P{action.priority} / {action.owner}</span>
-                        <strong>{action.action}</strong>
-                        <p>{action.reason}</p>
-                      </motion.div>
-                    ))}
-                  </div>
-                ) : (
-                  <p>Actions will appear here first: what to do, who should do it, and why the video evidence supports it.</p>
-                )}
-              </div>
-              <div className="scene-result-metrics">
-                <div>
-                  <span>Edge gate</span>
-                  <strong>{edgeGateLabel}</strong>
-                </div>
-                <div>
-                  <span>Local boxes</span>
-                  <strong>{hybridEdgeContext.detections || "--"} boxes</strong>
-                </div>
-                <div>
-                  <span>Cloud frames</span>
-                  <strong>{displayedCloudFrames}</strong>
-                </div>
-                <div>
-                  <span>Latency</span>
-                  <strong>{displayedLatency}</strong>
-                </div>
-                <div>
-                  <span>{liveUsage.requests ? "Live cost" : "Cost"}</span>
-                  <strong>{displayedCost}</strong>
-                </div>
-              </div>
-              <div className="object-chip-row detected-object-row" aria-label="Detected objects">
-                <strong>Detected objects</strong>
-                {objectChips.map((object) => (
-                  <span key={`${object.label}-${object.count}`}>
-                    {object.label} {object.count > 1 ? `x${object.count}` : ""} {object.score ? `${Math.round(object.score * 100)}%` : ""}
-                  </span>
-                ))}
-                {!objectChips.length ? <span>No objects captured yet</span> : null}
-                <small>{detectorStatus}. {edgeMetadataDetail}. {edgeGateDetail}</small>
-              </div>
-              <AnimatePresence>
-              {evidenceFrame && !liveRunning ? (
-                <motion.div className="evidence-frame-panel" aria-label="Evidence frame with detections" layout initial={prefersReducedMotion ? false : { opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }} transition={springTransition}>
-                  <div className="evidence-frame-topline">
-                    <span>Evidence frame</span>
-                    <strong>{evidenceDetections.length ? `${evidenceDetections.length} box${evidenceDetections.length === 1 ? "" : "es"}` : "No boxes yet"}</strong>
-                  </div>
-                  <div className="evidence-frame-image">
-                    <Image alt="Sampled evidence frame" fill sizes="(max-width: 720px) 100vw, 420px" src={evidenceFrame.imageDataUrl} unoptimized />
-                    {evidenceDetections.map((detection, index) => (
-                      <div
-                        className={`evidence-box ${cloudConfirmedLabels.has(detection.label.toLowerCase()) ? "cloud-confirmed" : ""}`}
-                        key={`${detection.label}-${index}-${detection.x}`}
-                        style={overlayStyleForDetection(detection, { x: 0, y: 0, w: 100, h: 100 })}
-                      >
-                        <span>{detection.label} {Math.round(detection.score * 100)}%{cloudConfirmedLabels.has(detection.label.toLowerCase()) ? " cloud" : ""}</span>
-                      </div>
-                    ))}
-                  </div>
-                </motion.div>
-              ) : null}
-              </AnimatePresence>
-              <AnimatePresence>
-              {analysis && !liveRunning ? (
-                <motion.div className="full-response-panel" layout initial={prefersReducedMotion ? false : { opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 12 }} transition={springTransition}>
-                  <div className="response-section">
-                    <span>Full response</span>
-                    <strong>{analysis.scene.summary}</strong>
-                    <p>{analysis.scene.environment} {analysis.scene.activity}</p>
-                  </div>
-                  {analysis.objects.length ? (
-                    <div className="detected-object-grid">
-                      {analysis.objects.slice(0, 6).map((object) => (
-                        <div key={`${object.label}-${object.evidence}`}>
-                          <strong>{object.label} {object.count > 1 ? `x${object.count}` : ""}</strong>
-                          <span>{object.locations.join(", ")}</span>
-                          <p>{object.evidence}</p>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                  {analysis.alerts.length ? (
-                    <div className="response-section compact-response-list">
-                      <span>Alerts</span>
-                      {analysis.alerts.slice(0, 3).map((alert) => (
-                        <p key={`${alert.label}-${alert.zoneId ?? "global"}`}>
-                          <strong>{alert.triggered ? "Triggered" : "Not triggered"}:</strong> {alert.label} - {alert.evidence}
-                        </p>
-                      ))}
-                    </div>
-                  ) : null}
-                  {analysis.timeline.length ? (
-                    <div className="response-section compact-response-list">
-                      <span>Timeline</span>
-                      {analysis.timeline.slice(0, 4).map((item) => (
-                        <p key={`${item.frame}-${item.observation}`}>
-                          <strong>Frame {item.frame}:</strong> {item.observation}
-                        </p>
-                      ))}
-                    </div>
-                  ) : null}
-                </motion.div>
-              ) : null}
-              </AnimatePresence>
             </motion.div>
 
             <label className="main-objective-box">
