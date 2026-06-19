@@ -1006,6 +1006,41 @@ h3 {
   line-height: 1.25;
 }
 
+.live-commentary-overlay {
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(17, 131, 75, 0.24);
+  border-radius: 14px;
+  box-shadow: 0 16px 36px rgba(16, 32, 25, 0.18);
+  color: var(--text);
+  display: grid;
+  gap: 4px;
+  left: 12px;
+  max-width: min(420px, calc(100% - 24px));
+  padding: 9px 10px;
+  position: absolute;
+  right: 12px;
+  top: 62px;
+  z-index: 5;
+}
+
+.live-commentary-overlay span {
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.live-commentary-overlay strong {
+  display: -webkit-box;
+  font-size: 12px;
+  line-height: 1.25;
+  line-clamp: 2;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .live-camera-frame video {
   object-fit: cover;
 }
@@ -3271,6 +3306,24 @@ h3 {
 
   .edge-live-hud em {
     display: none;
+  }
+
+  .live-commentary-overlay {
+    left: 8px;
+    max-width: calc(100% - 16px);
+    padding: 6px 7px;
+    right: 8px;
+    top: 48px;
+  }
+
+  .live-commentary-overlay span {
+    font-size: 8px;
+  }
+
+  .live-commentary-overlay strong {
+    font-size: 10px;
+    line-clamp: 1;
+    -webkit-line-clamp: 1;
   }
 
   .video-insights-row {

@@ -382,6 +382,7 @@ export function IndustrialVideoAnalyzer({
   const previewDetectionBusyRef = useRef(false);
   const lastPreviewDetectionAtRef = useRef(0);
   const latestPreviewDetectionsRef = useRef<LocalDetection[]>([]);
+  const lastRollingFrameAtRef = useRef(0);
   const motionSnapshotRef = useRef<MotionSnapshot | null>(null);
   const previousFrameRef = useRef<EdgeMetricResult["snapshot"] | null>(null);
   const zoneInteractionRef = useRef<ZoneInteraction | null>(null);
@@ -622,11 +623,13 @@ export function IndustrialVideoAnalyzer({
     if (source !== "camera" || !running) {
       latestPreviewDetectionsRef.current = [];
       motionSnapshotRef.current = null;
+      lastRollingFrameAtRef.current = 0;
       return;
     }
 
     let cancelled = false;
     lastPreviewDetectionAtRef.current = 0;
+    lastRollingFrameAtRef.current = 0;
 
     const runPreviewDetection = async (now: number) => {
       if (previewDetectionBusyRef.current) {
@@ -639,6 +642,8 @@ export function IndustrialVideoAnalyzer({
       previewDetectionBusyRef.current = true;
       const detectionStartedAt = performance.now();
       let motionDetections: LocalDetection[] = [];
+      let edgeMetricsForFrame: EdgeMetricResult["metrics"] | null = null;
+      let frameDataUrl: string | null = null;
       try {
         const canvas = canvasRef.current;
         if (canvas) {
@@ -648,6 +653,8 @@ export function IndustrialVideoAnalyzer({
             const motionResult = buildMotionCandidateBoxes(imageData, motionSnapshotRef.current);
             previousFrameRef.current = result.snapshot;
             motionSnapshotRef.current = motionResult.snapshot;
+            edgeMetricsForFrame = result.metrics;
+            frameDataUrl = canvasToJpegDataUrl(canvas, JPEG_QUALITY);
             motionDetections = motionResult.detections;
             if (!cancelled) {
               setEdgePreviewMetrics(result.metrics);
@@ -673,6 +680,22 @@ export function IndustrialVideoAnalyzer({
           if (!cancelled) {
             setDetectorStatus(motionDetections.length ? "Instant motion edge active; object model warming" : runtime.label);
             setEdgeDetectionLatencyMs(Math.round(performance.now() - detectionStartedAt));
+            if (edgeMetricsForFrame && frameDataUrl && now - lastRollingFrameAtRef.current >= 650) {
+              lastRollingFrameAtRef.current = now;
+              const imageDataUrl = frameDataUrl;
+              const edgeMetrics = edgeMetricsForFrame;
+              setLastFrames((frames) =>
+                [
+                  ...frames,
+                  {
+                    imageDataUrl,
+                    timestampMs: now,
+                    edgeMetrics,
+                    localDetections: motionDetections,
+                  },
+                ].slice(-MAX_FRAMES),
+              );
+            }
           }
           return;
         }
@@ -683,6 +706,22 @@ export function IndustrialVideoAnalyzer({
           setPreviewDetections(nextDetections);
           latestPreviewDetectionsRef.current = nextDetections;
           setEdgeDetectionLatencyMs(Math.round(performance.now() - detectionStartedAt));
+          if (edgeMetricsForFrame && frameDataUrl && now - lastRollingFrameAtRef.current >= 650) {
+            lastRollingFrameAtRef.current = now;
+            const imageDataUrl = frameDataUrl;
+            const edgeMetrics = edgeMetricsForFrame;
+            setLastFrames((frames) =>
+              [
+                ...frames,
+                {
+                  imageDataUrl,
+                  timestampMs: now,
+                  edgeMetrics,
+                  localDetections: nextDetections,
+                },
+              ].slice(-MAX_FRAMES),
+            );
+          }
           updateVideoViewport();
         }
       } catch {
@@ -690,6 +729,22 @@ export function IndustrialVideoAnalyzer({
           if (motionDetections.length) {
             setPreviewDetections(motionDetections);
             latestPreviewDetectionsRef.current = motionDetections;
+            if (edgeMetricsForFrame && frameDataUrl && now - lastRollingFrameAtRef.current >= 650) {
+              lastRollingFrameAtRef.current = now;
+              const imageDataUrl = frameDataUrl;
+              const edgeMetrics = edgeMetricsForFrame;
+              setLastFrames((frames) =>
+                [
+                  ...frames,
+                  {
+                    imageDataUrl,
+                    timestampMs: now,
+                    edgeMetrics,
+                    localDetections: motionDetections,
+                  },
+                ].slice(-MAX_FRAMES),
+              );
+            }
             updateVideoViewport();
           }
           setDetectorStatus("Motion edge active; object model still loading");
@@ -1079,7 +1134,15 @@ export function IndustrialVideoAnalyzer({
     if (analyzing || holdRecordingRef.current.active) {
       return false;
     }
-    if (!lastFrames.length) {
+    let framesForCloud = lastFrames;
+    if (source === "camera" && running) {
+      const freshFrame = await captureOneFrame(performance.now());
+      if (freshFrame) {
+        framesForCloud = [...lastFrames, freshFrame].slice(-MAX_FRAMES);
+        setLastFrames(framesForCloud);
+      }
+    }
+    if (!framesForCloud.length) {
       setError("Record a local edge burst first. The cloud button sends only selected edge frames, not the live stream.");
       setStatus("cloud send blocked - no local edge frames");
       return false;
@@ -1088,11 +1151,11 @@ export function IndustrialVideoAnalyzer({
     setError(null);
     setStatus("sending selected edge frames to cloud");
     try {
-      return await submitFramesForAnalysis(lastFrames);
+      return await submitFramesForAnalysis(framesForCloud);
     } finally {
       setAnalyzing(false);
     }
-  }, [analyzing, lastFrames, submitFramesForAnalysis]);
+  }, [analyzing, captureOneFrame, lastFrames, running, source, submitFramesForAnalysis]);
 
   const beginHoldRecording = useCallback(async (event?: PointerEvent<HTMLButtonElement>) => {
     if (source !== "camera" || analyzing || holdRecordingRef.current.active) {
@@ -1505,6 +1568,12 @@ export function IndustrialVideoAnalyzer({
       ? `${hybridEdgeContext.detections} local box${hybridEdgeContext.detections === 1 ? "" : "es"} ready for cloud context`
       : "Edge metadata will appear while recording";
   const recordingProgressPercent = Math.round(recordingProgress * 100);
+  const liveCommentary = liveTranscript[0] ?? (liveRunning ? "Live edge is watching the current camera view." : null);
+  const displayHeadline = analysis?.headline ?? (liveRunning ? "Live edge camera is running" : "Point camera, record, get the answer here");
+  const displayCommentary =
+    analysis?.commentary ??
+    liveCommentary ??
+    "Start live edge or record a short local burst. When the boxes look useful, press Send selected frames to cloud for Gemini/OpenAI reasoning.";
 
   return (
     <main className="industrial-shell">
@@ -1554,6 +1623,12 @@ export function IndustrialVideoAnalyzer({
               <small>{edgeHudDetail}</small>
               <em>{edgePreviewQuality}. Green boxes are browser edge; blue boxes are cloud-confirmed.</em>
             </div>
+            {liveRunning && liveCommentary ? (
+              <div className="live-commentary-overlay" aria-live="polite">
+                <span>Live commentary</span>
+                <strong>{liveCommentary}</strong>
+              </div>
+            ) : null}
             <div className={`video-processing-badge ${analyzing ? "active" : analysis ? "ready" : ""}`}>
               <strong>{videoProcessingTitle}</strong>
               <span>{videoProcessingDetail}</span>
@@ -1637,8 +1712,8 @@ export function IndustrialVideoAnalyzer({
                 <span>{resultStatus}</span>
                 <strong>{analysis ? `${Math.round(analysis.confidence)}% confidence` : analyzing ? "Working..." : "No cloud call yet"}</strong>
               </div>
-              <h2>{analysis?.headline ?? "Point camera, record, get the answer here"}</h2>
-              <p>{analysis?.commentary ?? "Start live edge or record a short local burst. When the boxes look useful, press Send selected frames to cloud for Gemini/OpenAI reasoning."}</p>
+              <h2>{displayHeadline}</h2>
+              <p>{displayCommentary}</p>
               <div className={`priority-actions-panel ${actionPreview.length ? "ready" : ""}`} aria-label="Recommended actions">
                 <div className="priority-actions-heading">
                   <span>Recommended actions</span>
