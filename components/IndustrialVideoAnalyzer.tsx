@@ -1,6 +1,7 @@
 "use client";
 
 import { AlertTriangle, Camera, Crosshair, FileVideo, Pause, Play, Radar, RotateCcw } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import Image from "next/image";
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent } from "react";
 import { buildVideoConstraints, listVideoInputDevices, stopStream, type CameraFacing } from "@/lib/camera";
@@ -9,6 +10,7 @@ import { canvasToJpegDataUrl, captureVideoFrame, computeEdgeMetrics, type EdgeMe
 import { summarizeHybridEdgeContext } from "@/lib/hybridEdgeContext";
 import { detectObjectsForVideo, getObjectDetectorRuntime, tryCreateObjectDetector } from "@/lib/mediaPipeDetector";
 import { fallbackObjectChips, summarizeEdgeDetections } from "@/lib/resultPresentation";
+import { detectObjectsWithTransformers, getTransformersDetectorRuntime } from "@/lib/transformersDetector";
 import type { LocalDetection } from "@/lib/types";
 import type { ProviderId, SampledFrame, VideoAnalysisResponse, VideoMode, VideoSource, Zone } from "@/lib/videoSchema";
 
@@ -49,19 +51,20 @@ type MotionSnapshot = {
   cells: Uint8Array;
 };
 
-const MAX_FRAMES = 5;
+const MAX_FRAMES = 4;
 const MAX_CLOUD_FRAMES = 3;
-const CAMERA_CAPTURE_WINDOW_MS = 2000;
-const PREVIEW_DETECTION_INTERVAL_MS = 220;
-const SMART_RECORDING_MIN_MS = 1800;
-const SMART_RECORDING_MAX_MS = 4200;
-const SMART_RECORDING_INTERVAL_MS = 360;
+const CAMERA_CAPTURE_WINDOW_MS = 1600;
+const PREVIEW_DETECTION_INTERVAL_MS = 180;
+const TRANSFORMERS_LIVE_INTERVAL_MS = 1400;
+const SMART_RECORDING_MIN_MS = 1100;
+const SMART_RECORDING_MAX_MS = 2600;
+const SMART_RECORDING_INTERVAL_MS = 260;
 const EDGE_MOTION_TRIGGER_SCORE = 8;
 const EDGE_OBJECT_TRIGGER_SCORE = 0.5;
 const MOTION_GRID_COLUMNS = 18;
 const MOTION_GRID_ROWS = 12;
 const MOTION_CELL_TRIGGER = 26;
-const JPEG_QUALITY = 0.58;
+const JPEG_QUALITY = 0.54;
 const DEMO_ANALYSIS_LIMIT = Number(process.env.NEXT_PUBLIC_DEMO_ANALYSIS_LIMIT ?? 20);
 
 const OBJECTIVE_PRESETS: Array<{ label: string; mode: VideoMode; objective: string }> = [
@@ -202,10 +205,31 @@ function isLocalDetection(value: unknown): value is LocalDetection {
   );
 }
 
+function isProposalDetection(detection: LocalDetection): boolean {
+  return detection.label.includes("/") || detection.label.includes("region") || detection.label.includes("attention") || detection.label.includes("candidate");
+}
+
 function mergeDetections(current: LocalDetection[], additions: LocalDetection[]): LocalDetection[] {
   return [...current, ...additions]
     .sort((left, right) => right.score - left.score)
     .slice(0, 20);
+}
+
+function selectDisplayDetections(detections: LocalDetection[], limit = 2): LocalDetection[] {
+  const realDetections = detections.filter((detection) => !isProposalDetection(detection));
+  const proposals = detections.filter(isProposalDetection);
+  if (realDetections.length) {
+    return realDetections.slice(0, limit);
+  }
+  const motionProposals = proposals.filter((detection) => detection.label.includes("motion"));
+  if (motionProposals.length) {
+    return motionProposals.slice(0, 1);
+  }
+  const screenProposals = proposals.filter((detection) => detection.label.includes("screen") || detection.label.includes("dark panel"));
+  if (screenProposals.length) {
+    return screenProposals.slice(0, 1);
+  }
+  return proposals.slice(0, 1);
 }
 
 function safelySetPointerCapture(element: Element, pointerId: number): void {
@@ -316,14 +340,20 @@ function proposalOverlap(a: LocalDetection, b: LocalDetection): number {
 
 function mergeProposalDetections(detections: LocalDetection[]): LocalDetection[] {
   return detections
-    .sort((left, right) => right.score - left.score)
+    .sort((left, right) => {
+      const leftRealBoost = isProposalDetection(left) ? 0 : 0.22;
+      const rightRealBoost = isProposalDetection(right) ? 0 : 0.22;
+      const leftScreenBoost = left.label.includes("screen") ? 0.12 : 0;
+      const rightScreenBoost = right.label.includes("screen") ? 0.12 : 0;
+      return right.score + rightRealBoost + rightScreenBoost - (left.score + leftRealBoost + leftScreenBoost);
+    })
     .reduce<LocalDetection[]>((merged, detection) => {
       if (merged.some((existing) => proposalOverlap(existing, detection) > 0.74)) {
         return merged;
       }
       return [...merged, detection];
     }, [])
-    .slice(0, 5);
+    .slice(0, 2);
 }
 
 function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapshot | null): {
@@ -388,15 +418,7 @@ function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapsho
     0.52,
     3,
   );
-  const fallbackDetection: LocalDetection = {
-    label: "scene region",
-    score: 0.5,
-    x: 0.22,
-    y: 0.18,
-    w: 0.56,
-    h: 0.58,
-  };
-  const staticProposals = mergeProposalDetections([...darkPanelDetections, ...visualDetections, fallbackDetection]);
+  const staticProposals = mergeProposalDetections([...darkPanelDetections, ...visualDetections]);
 
   if (!previous || previous.width !== width || previous.height !== height) {
     return { snapshot, detections: staticProposals };
@@ -491,6 +513,7 @@ export function IndustrialVideoAnalyzer({
   providerStatus: Record<ProviderId, boolean>;
   roboflowReady: boolean;
 }) {
+  const prefersReducedMotion = useReducedMotion();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const videoFrameRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -505,6 +528,7 @@ export function IndustrialVideoAnalyzer({
   const lastPreviewDetectionAtRef = useRef(0);
   const latestPreviewDetectionsRef = useRef<LocalDetection[]>([]);
   const lastRollingFrameAtRef = useRef(0);
+  const lastTransformersDetectionAtRef = useRef(0);
   const motionSnapshotRef = useRef<MotionSnapshot | null>(null);
   const previousFrameRef = useRef<EdgeMetricResult["snapshot"] | null>(null);
   const zoneInteractionRef = useRef<ZoneInteraction | null>(null);
@@ -752,6 +776,7 @@ export function IndustrialVideoAnalyzer({
     let cancelled = false;
     lastPreviewDetectionAtRef.current = 0;
     lastRollingFrameAtRef.current = 0;
+    lastTransformersDetectionAtRef.current = 0;
 
     const runPreviewDetection = async (now: number) => {
       if (previewDetectionBusyRef.current) {
@@ -821,13 +846,32 @@ export function IndustrialVideoAnalyzer({
           }
           return;
         }
+        const shouldRunTransformers = Boolean(frameDataUrl) && now - lastTransformersDetectionAtRef.current >= TRANSFORMERS_LIVE_INTERVAL_MS;
+        if (shouldRunTransformers) {
+          lastTransformersDetectionAtRef.current = now;
+        }
         setDetectorStatus(runtime.label);
-        const detections = await detectObjectsForVideo(video, now);
+        const [mediaPipeDetections, transformerDetections] = await Promise.all([
+          detectObjectsForVideo(video, now),
+          shouldRunTransformers && frameDataUrl ? detectObjectsWithTransformers(frameDataUrl, 900) : Promise.resolve([]),
+        ]);
         if (!cancelled) {
-          const nextDetections = detections.length ? detections : motionDetections;
+          const transformersRuntime = getTransformersDetectorRuntime();
+          const nextDetections = mergeProposalDetections([
+            ...mediaPipeDetections,
+            ...transformerDetections,
+            ...motionDetections,
+          ]);
           setPreviewDetections(nextDetections);
           latestPreviewDetectionsRef.current = nextDetections;
           setEdgeDetectionLatencyMs(Math.round(performance.now() - detectionStartedAt));
+          setDetectorStatus(
+            transformerDetections.length
+              ? `${runtime.label}; ${transformersRuntime.label}`
+              : transformersRuntime.loading
+                ? `${runtime.label}; Transformers.js warming`
+                : runtime.label,
+          );
           if (edgeMetricsForFrame && frameDataUrl && now - lastRollingFrameAtRef.current >= 650) {
             lastRollingFrameAtRef.current = now;
             const imageDataUrl = frameDataUrl;
@@ -1017,13 +1061,15 @@ export function IndustrialVideoAnalyzer({
       return null;
     }
 
-    const imageData = captureVideoFrame(video, canvas, 720);
+    const imageData = captureVideoFrame(video, canvas, 640);
     if (!imageData) {
       return null;
     }
 
     const result = computeEdgeMetrics(imageData, previousFrameRef.current);
+    const proposalResult = buildMotionCandidateBoxes(imageData, motionSnapshotRef.current);
     previousFrameRef.current = result.snapshot;
+    motionSnapshotRef.current = proposalResult.snapshot;
     setEdgePreviewMetrics(result.metrics);
     setEdgePreviewFrameCount((count) => count + 1);
 
@@ -1032,12 +1078,24 @@ export function IndustrialVideoAnalyzer({
       localDetections = latestPreviewDetectionsRef.current;
     } else {
       try {
-        localDetections = await detectObjectsForVideo(video, performance.now());
+        const imageDataUrl = canvasToJpegDataUrl(canvas, JPEG_QUALITY);
+        const [mediaPipeDetections, transformerDetections] = await Promise.all([
+          detectObjectsForVideo(video, performance.now()),
+          detectObjectsWithTransformers(imageDataUrl, 2500),
+        ]);
+        localDetections = mergeProposalDetections([
+          ...mediaPipeDetections,
+          ...transformerDetections,
+          ...proposalResult.detections,
+        ]);
         setPreviewDetections(localDetections);
         latestPreviewDetectionsRef.current = localDetections;
         updateVideoViewport();
       } catch {
-        localDetections = [];
+        localDetections = proposalResult.detections;
+        setPreviewDetections(localDetections);
+        latestPreviewDetectionsRef.current = localDetections;
+        updateVideoViewport();
       }
     }
 
@@ -1081,6 +1139,7 @@ export function IndustrialVideoAnalyzer({
     const detectorRuntime = await tryCreateObjectDetector();
     setDetectorStatus(detectorRuntime.label);
     previousFrameRef.current = null;
+    motionSnapshotRef.current = null;
     const frames: SampledFrame[] = [];
 
     if (source === "camera" || !Number.isFinite(video.duration) || video.duration <= 0) {
@@ -1329,7 +1388,7 @@ export function IndustrialVideoAnalyzer({
           const triggerSeen = edgeSelection.summary.objectFrames > 0 || edgeSelection.summary.motionFrames > 0;
           const triggerLabel = edgeSelection.summary.objectFrames > 0 ? "object trigger" : edgeSelection.summary.motionFrames > 0 ? "motion trigger" : "watching";
           setStatus(`smart recording - ${triggerLabel} - ${nextFrames.length} edge frame${nextFrames.length === 1 ? "" : "s"}`);
-          if (elapsedMs >= SMART_RECORDING_MIN_MS && triggerSeen && nextFrames.length >= 3) {
+          if (elapsedMs >= SMART_RECORDING_MIN_MS && triggerSeen && nextFrames.length >= 2) {
             holdRecordingRef.current.stopRequested = true;
           }
         }
@@ -1594,10 +1653,10 @@ export function IndustrialVideoAnalyzer({
   const providerLabel = PROVIDER_COPY[provider].label;
   const sourceCaptureDetail = isLiveSource
     ? `Live camera: tap Record, draw edge boxes immediately, sample up to ${MAX_FRAMES} local frames, then send one edge-selected cloud request.`
-    : `Uploaded/demo video: sample up to ${MAX_FRAMES} keyframes across the full clip duration, then send selected JPEGs.`;
+    : `Uploaded/demo video: scan up to ${MAX_FRAMES} keyframes across the clip duration, then send only selected JPEGs.`;
   const analyzeLabel = isLiveSource
-    ? "Record live scene"
-    : `Ask ${providerLabel} about this clip`;
+    ? "Record edge burst"
+    : `Analyze clip with ${providerLabel}`;
   const cameraFacingLabel = cameraFacing === "environment" ? "Back camera" : "Front camera";
   const hasLocalEdgeFrames = lastFrames.length > 0;
   const canSendCloud = hasLocalEdgeFrames && !analyzing && !holdRecording;
@@ -1618,7 +1677,7 @@ export function IndustrialVideoAnalyzer({
     ? "Cloud request running. Hold this view until the response returns."
     : analyzing
       ? isLiveSource
-        ? `Recording locally only. Press Send to cloud after edge frames are ready.`
+        ? `Recording locally. Keep pointing at the scene; cloud is not called yet.`
         : `Sampling keyframes across the clip. Full video stays local.`
       : analysis
         ? "Cloud response received. Adjust the prompt or scene, then analyze again."
@@ -1656,9 +1715,9 @@ export function IndustrialVideoAnalyzer({
   const objectChips = analysis?.objects.length ? fallbackObjectChips(analysis) : localObjectChips;
   const resultStatus = analysis ? "Scene result" : analyzing ? "Analyzing scene" : "Ready for scene result";
   const evidenceFrame = lastFrames.find((frame) => frame.localDetections.length > 0) ?? lastFrames[0] ?? null;
-  const evidenceDetections = evidenceFrame?.localDetections.slice(0, 8) ?? [];
+  const evidenceDetections = evidenceFrame ? selectDisplayDetections(evidenceFrame.localDetections, 2) : [];
   const liveOverlayFrame = lastFrames.length ? lastFrames[lastFrames.length - 1] : null;
-  const liveOverlayDetections = (source === "camera" && previewDetections.length ? previewDetections : liveOverlayFrame?.localDetections ?? []).slice(0, 8);
+  const liveOverlayDetections = selectDisplayDetections(source === "camera" && previewDetections.length ? previewDetections : liveOverlayFrame?.localDetections ?? [], 2);
   const hybridEdgeContext = summarizeHybridEdgeContext(lastFrames);
   const cloudConfirmedLabels = new Set(analysis?.objects.map((object) => object.label.toLowerCase()) ?? []);
   const edgeGateLabel = edgeGateSummary
@@ -1683,7 +1742,15 @@ export function IndustrialVideoAnalyzer({
       ? "usable frame"
       : edgePreviewMetrics.rejectionReason ?? "low-quality frame"
     : "no frame yet";
-  const edgeHudDetail = `${previewDetections.length} box${previewDetections.length === 1 ? "" : "es"} - ${edgeLoopFps || "--"} fps - ${edgeDetectionLatencyMs || "--"}ms - edge frame ${edgePreviewFrameCount}`;
+  const transformersRuntime = getTransformersDetectorRuntime();
+  const edgeModelLabel = transformersRuntime.ready
+    ? transformersRuntime.device === "webgpu"
+      ? "MediaPipe + Transformers WebGPU"
+      : "MediaPipe + Transformers WASM"
+    : transformersRuntime.loading
+      ? "MediaPipe + Transformers warming"
+      : "MediaPipe edge";
+  const edgeHudDetail = `${edgeModelLabel} - ${previewDetections.length} box${previewDetections.length === 1 ? "" : "es"} - ${edgeLoopFps || "--"} fps - ${edgeDetectionLatencyMs || "--"}ms - frame ${edgePreviewFrameCount}`;
   const edgeMetadataDetail = edgeGateSummary
     ? `${hybridEdgeContext.detections} local box${hybridEdgeContext.detections === 1 ? "" : "es"} sent as metadata with ${edgeGateSummary.selectedFrames} image frame${edgeGateSummary.selectedFrames === 1 ? "" : "s"}`
     : hybridEdgeContext.frames
@@ -1698,70 +1765,89 @@ export function IndustrialVideoAnalyzer({
         : "Start camera to begin edge proposals";
   const recordingProgressPercent = Math.round(recordingProgress * 100);
   const liveCommentary = liveTranscript[0] ?? (liveRunning ? "Live edge is watching the current camera view." : null);
-  const displayHeadline = analysis?.headline ?? (liveRunning ? "Live edge camera is running" : "Point camera, record, get the answer here");
+  const displayHeadline = analysis?.headline ?? (liveRunning ? "Live edge camera is running" : "Point camera or upload a clip. Ask anything.");
   const displayCommentary =
     analysis?.commentary ??
     liveCommentary ??
-    "Start live edge or record a short local burst. When the boxes look useful, press Send selected frames to cloud for Gemini/OpenAI reasoning.";
+    "The browser runs fast edge detection first. Press record/sample, then send selected evidence frames to Gemini/OpenAI for the full answer.";
+  const springTransition = prefersReducedMotion ? { duration: 0 } : { type: "spring" as const, stiffness: 260, damping: 30 };
+  const fadeUp = prefersReducedMotion
+    ? {}
+    : {
+        initial: { opacity: 0, y: 12 },
+        animate: { opacity: 1, y: 0 },
+        transition: springTransition,
+      };
 
   return (
-    <main className="industrial-shell">
-      <header className="industrial-header">
+    <motion.main className="industrial-shell" {...fadeUp}>
+      <motion.header className="industrial-header" layout transition={springTransition}>
         <div>
           <p className="eyebrow">Cloud video analytics API showcase</p>
           <h1>Ask Gemini/OpenAI anything about live video.</h1>
-          <p className="app-subtitle">Point the camera, upload a clip, or run a sample. The browser first detects objects and motion, then only triggered frames go to cloud vision models for evidence, cost, and next actions.</p>
+          <p className="app-subtitle">Point a camera or upload video. Browser edge models detect objects and motion first; selected evidence frames go to Gemini/OpenAI for structured video analytics.</p>
         </div>
         <div className="loop">
           <span>video</span>
           <span>edge object + motion gate</span>
           <span>plain-language objective</span>
           <span>Gemini/OpenAI Vision/Cosmos</span>
-          <span>alert API</span>
+          <span>structured answer</span>
         </div>
-      </header>
+      </motion.header>
 
-      <section className="industrial-grid">
-        <div className="video-workbench panel">
-          <div
+      <motion.section className="industrial-grid" layout transition={springTransition}>
+        <motion.div className="video-workbench panel" layout transition={springTransition}>
+          <motion.div
             className={`industrial-video-frame ${videoOrientation} ${source === "camera" ? "live-camera-frame" : "clip-video-frame"}`}
+            layout
             onPointerDown={startZoneDraw}
             onPointerMove={updateZoneDraw}
             onPointerUp={endZoneDraw}
             ref={videoFrameRef}
+            transition={springTransition}
           >
             <video muted onLoadedMetadata={updateVideoOrientation} onResize={updateVideoOrientation} playsInline ref={videoRef} />
-            {liveOverlayDetections.length ? (
-              <div className="live-detection-overlay" aria-label="Browser edge detection overlay">
+            <AnimatePresence>
+              {liveOverlayDetections.length ? (
+              <motion.div className="live-detection-overlay" aria-label="Browser edge detection overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                 {liveOverlayDetections.map((detection, index) => (
-                  <div
-                    className={`live-detection-box ${detection.label.includes("/") || detection.label.includes("region") || detection.label.includes("attention") ? "edge-proposal" : ""} ${cloudConfirmedLabels.has(detection.label.toLowerCase()) ? "cloud-confirmed" : ""}`}
+                  <motion.div
+                    layout
+                    className={`live-detection-box ${isProposalDetection(detection) ? "edge-proposal" : ""} ${cloudConfirmedLabels.has(detection.label.toLowerCase()) ? "cloud-confirmed" : ""}`}
                     key={`${detection.label}-${index}-${detection.x}-${detection.y}`}
+                    initial={prefersReducedMotion ? false : { opacity: 0, scale: 0.96 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={prefersReducedMotion ? undefined : { opacity: 0, scale: 0.96 }}
                     style={overlayStyleForDetection(detection, videoViewport)}
+                    transition={springTransition}
                   >
                     <span>{detection.label} {Math.round(detection.score * 100)}%{cloudConfirmedLabels.has(detection.label.toLowerCase()) ? " cloud" : ""}</span>
-                  </div>
+                  </motion.div>
                 ))}
-              </div>
+              </motion.div>
             ) : null}
-            <div className={`edge-live-hud ${edgePreviewObjectTrigger || edgePreviewMotionTrigger ? "triggered" : ""}`}>
+            </AnimatePresence>
+            <motion.div className={`edge-live-hud ${edgePreviewObjectTrigger || edgePreviewMotionTrigger ? "triggered" : ""}`} layout transition={springTransition}>
               <div>
                 <span>Live edge processing</span>
                 <strong>{edgePreviewDecision}</strong>
               </div>
               <small>{edgeHudDetail}</small>
               <em>{edgePreviewQuality}. Green = edge proposal; blue = cloud-confirmed.</em>
-            </div>
+            </motion.div>
+            <AnimatePresence>
             {liveRunning && liveCommentary ? (
-              <div className="live-commentary-overlay" aria-live="polite">
+              <motion.div className="live-commentary-overlay" aria-live="polite" initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={springTransition}>
                 <span>Live commentary</span>
                 <strong>{liveCommentary}</strong>
-              </div>
+              </motion.div>
             ) : null}
-            <div className={`video-processing-badge ${analyzing ? "active" : analysis ? "ready" : ""}`}>
+            </AnimatePresence>
+            <motion.div className={`video-processing-badge ${analyzing ? "active" : analysis ? "ready" : ""}`} layout transition={springTransition}>
               <strong>{videoProcessingTitle}</strong>
               <span>{videoProcessingDetail}</span>
-            </div>
+            </motion.div>
             {zoneToolOpen ? zones.map((zone) => (
               <div
                 className="drawn-zone"
@@ -1789,23 +1875,39 @@ export function IndustrialVideoAnalyzer({
             )) : null}
             <div className="camera-status" title={status}>{cameraCaptureState}</div>
             <div className={`video-hold-hint ${analyzing ? "active" : ""}`}>{videoHint}</div>
-          </div>
+          </motion.div>
           <canvas className="hidden-canvas" ref={canvasRef} />
 
-          <div className="first-fold-console">
+          <motion.div className="first-fold-console" layout transition={springTransition}>
+            <motion.div className="native-workflow-rail" aria-label="Video analytics workflow status" layout transition={springTransition}>
+              <motion.div className={source !== "camera" || running ? "active" : ""} layout transition={springTransition}>
+                <span>01</span>
+                <strong>{source === "camera" ? running ? "Camera live" : "Start camera" : "Clip loaded"}</strong>
+              </motion.div>
+              <motion.div className={hasLocalEdgeFrames || analyzing ? "active" : ""} layout transition={springTransition}>
+                <span>02</span>
+                <strong>{hasLocalEdgeFrames ? `${lastFrames.length} edge frames` : analyzing ? "Sampling edge" : "Capture evidence"}</strong>
+              </motion.div>
+              <motion.div className={analysis || isCloudSending ? "active" : ""} layout transition={springTransition}>
+                <span>03</span>
+                <strong>{analysis ? "Cloud answer ready" : isCloudSending ? "Cloud reasoning" : "Send to cloud"}</strong>
+              </motion.div>
+            </motion.div>
+
             <div className="first-fold-header">
               <div>
                 <span>On-the-fly video analytics</span>
-                <strong>Ask anything about this video</strong>
+                <strong>{source === "camera" ? "Live edge camera + cloud answer" : "Uploaded video + cloud answer"}</strong>
               </div>
               <small>{isLiveSource ? "Live camera burst" : "Full clip keyframe scan"}</small>
             </div>
 
             <div className="primary-record-strip">
-              <button
+              <motion.button
                 aria-pressed={holdRecording}
                 className={`analyze-button first-fold-analyze ${isRecordingLocal ? "recording" : ""}`}
                 disabled={source === "camera" ? isCloudSending : analyzing}
+                whileTap={prefersReducedMotion ? undefined : { scale: 0.98 }}
                 onClick={(event) => {
                   if (source === "camera") {
                     event.preventDefault();
@@ -1821,14 +1923,14 @@ export function IndustrialVideoAnalyzer({
                 type="button"
               >
                 <span className="record-dot" /> {analyzeButtonText}
-              </button>
+              </motion.button>
               {isLiveSource ? (
-                <button className="send-cloud-button" disabled={!canSendCloud} onClick={() => void sendLatestFramesToCloud()} type="button">
-                  Send selected frames to cloud
+                <motion.button className="send-cloud-button" disabled={!canSendCloud} onClick={() => void sendLatestFramesToCloud()} type="button" whileTap={prefersReducedMotion ? undefined : { scale: 0.98 }}>
+                  Send evidence to cloud
                   <span>{hasLocalEdgeFrames ? `${lastFrames.length} local frame${lastFrames.length === 1 ? "" : "s"} ready` : "record first"}</span>
-                </button>
+                </motion.button>
               ) : null}
-              <small>{isLiveSource ? `Step 1: record local edge boxes. Step 2: click cloud when the evidence looks right.` : "Click once to sample this clip and send selected frames."}</small>
+              <small>{isLiveSource ? `Record samples edge frames locally. Send to cloud when the evidence is current.` : "One click samples the clip and sends selected evidence frames."}</small>
               {isLiveSource ? (
                 <div className="smart-record-progress" aria-label={`Recording progress ${recordingProgressPercent}%`}>
                   <span style={{ width: `${recordingProgressPercent}%` }} />
@@ -1836,29 +1938,39 @@ export function IndustrialVideoAnalyzer({
               ) : null}
             </div>
 
-            <div className="hybrid-pipeline-strip" aria-label="Hybrid edge and cloud pipeline">
-              <div className={running ? "active" : ""}>
-                <span>1 Edge proposes</span>
-                <strong>{previewDetections.length || "--"} live box{previewDetections.length === 1 ? "" : "es"}</strong>
-              </div>
-              <div className={hasLocalEdgeFrames ? "active" : ""}>
-                <span>2 Rolling buffer</span>
+            <motion.div className="hybrid-pipeline-strip" aria-label="Hybrid edge and cloud pipeline" layout transition={springTransition}>
+              <motion.div className={running ? "active" : ""} layout transition={springTransition}>
+                <span>Local edge</span>
+                <strong>{edgeModelLabel}</strong>
+              </motion.div>
+              <motion.div className={hasLocalEdgeFrames ? "active" : ""} layout transition={springTransition}>
+                <span>Frame buffer</span>
                 <strong>{lastFrames.length || "--"} current frame{lastFrames.length === 1 ? "" : "s"}</strong>
-              </div>
-              <div className={analysis ? "active" : ""}>
-                <span>3 Cloud enhances</span>
+              </motion.div>
+              <motion.div className={analysis ? "active" : ""} layout transition={springTransition}>
+                <span>Cloud answer</span>
                 <strong>{analysis ? `${Math.round(analysis.confidence)}%` : "manual send"}</strong>
-              </div>
-              <small>{hybridPipelineStatus}. Green boxes are local proposals; blue means cloud-confirmed.</small>
-            </div>
+              </motion.div>
+              <small>{hybridPipelineStatus}. Edge filters the video; cloud reasons over selected evidence.</small>
+            </motion.div>
 
-            <div className={`scene-result-card ${analysis ? "ready" : analyzing ? "loading" : ""}`}>
+            <motion.div className={`scene-result-card ${analysis ? "ready" : analyzing ? "loading" : ""}`} layout transition={springTransition}>
               <div className="scene-result-topline">
                 <span>{resultStatus}</span>
                 <strong>{analysis ? `${Math.round(analysis.confidence)}% confidence` : analyzing ? "Working..." : "No cloud call yet"}</strong>
               </div>
-              <h2>{displayHeadline}</h2>
+              <AnimatePresence mode="popLayout">
+                <motion.h2 key={displayHeadline} layout initial={prefersReducedMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={prefersReducedMotion ? undefined : { opacity: 0, y: -8 }} transition={springTransition}>{displayHeadline}</motion.h2>
+              </AnimatePresence>
               <p>{displayCommentary}</p>
+              <AnimatePresence>
+              {error ? (
+                <motion.div className="primary-error-banner" role="alert" initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={springTransition}>
+                  <AlertTriangle size={16} />
+                  <span>{error}</span>
+                </motion.div>
+              ) : null}
+              </AnimatePresence>
               <div className={`priority-actions-panel ${actionPreview.length ? "ready" : ""}`} aria-label="Recommended actions">
                 <div className="priority-actions-heading">
                   <span>Recommended actions</span>
@@ -1867,11 +1979,11 @@ export function IndustrialVideoAnalyzer({
                 {actionPreview.length ? (
                   <div className="priority-action-list">
                     {actionPreview.map((action) => (
-                      <div className="priority-action-item" key={`${action.priority}-${action.action}`}>
+                      <motion.div className="priority-action-item" key={`${action.priority}-${action.action}`} layout initial={prefersReducedMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={springTransition}>
                         <span>P{action.priority} / {action.owner}</span>
                         <strong>{action.action}</strong>
                         <p>{action.reason}</p>
-                      </div>
+                      </motion.div>
                     ))}
                   </div>
                 ) : (
@@ -1884,7 +1996,7 @@ export function IndustrialVideoAnalyzer({
                   <strong>{edgeGateLabel}</strong>
                 </div>
                 <div>
-                  <span>Edge metadata</span>
+                  <span>Local boxes</span>
                   <strong>{hybridEdgeContext.detections || "--"} boxes</strong>
                 </div>
                 <div>
@@ -1910,8 +2022,9 @@ export function IndustrialVideoAnalyzer({
                 {!objectChips.length ? <span>No objects captured yet</span> : null}
                 <small>{detectorStatus}. {edgeMetadataDetail}. {edgeGateDetail}</small>
               </div>
+              <AnimatePresence>
               {evidenceFrame ? (
-                <div className="evidence-frame-panel" aria-label="Evidence frame with detections">
+                <motion.div className="evidence-frame-panel" aria-label="Evidence frame with detections" layout initial={prefersReducedMotion ? false : { opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }} transition={springTransition}>
                   <div className="evidence-frame-topline">
                     <span>Evidence frame</span>
                     <strong>{evidenceDetections.length ? `${evidenceDetections.length} box${evidenceDetections.length === 1 ? "" : "es"}` : "No boxes yet"}</strong>
@@ -1928,10 +2041,12 @@ export function IndustrialVideoAnalyzer({
                       </div>
                     ))}
                   </div>
-                </div>
+                </motion.div>
               ) : null}
+              </AnimatePresence>
+              <AnimatePresence>
               {analysis ? (
-                <div className="full-response-panel">
+                <motion.div className="full-response-panel" layout initial={prefersReducedMotion ? false : { opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 12 }} transition={springTransition}>
                   <div className="response-section">
                     <span>Full response</span>
                     <strong>{analysis.scene.summary}</strong>
@@ -1968,9 +2083,10 @@ export function IndustrialVideoAnalyzer({
                       ))}
                     </div>
                   ) : null}
-                </div>
+                </motion.div>
               ) : null}
-            </div>
+              </AnimatePresence>
+            </motion.div>
 
             <label className="main-objective-box">
               <span>Plain-language analytics question</span>
@@ -2075,13 +2191,13 @@ export function IndustrialVideoAnalyzer({
                 <small>{forceCloudAnalysis ? "Demo-safe: always returns an answer." : "Strict efficiency: cloud only after local object/motion trigger."}</small>
               </span>
             </label>
-          </div>
+          </motion.div>
 
           <p className="panel-note">
             Camera mode records local edge evidence first. Cloud analysis only runs when you press Send selected frames to cloud. Full video stays in the browser; only object/motion-triggered JPEG keyframes are sent.
             Upload mode works without camera access on Safari, Edge, Chrome, and desktop browsers that support video canvas extraction.
           </p>
-        </div>
+        </motion.div>
 
         <aside className="analytics-control panel">
           <details className="optional-config-panel">
@@ -2171,7 +2287,7 @@ export function IndustrialVideoAnalyzer({
             </div>
           ) : null}
         </aside>
-      </section>
-    </main>
+      </motion.section>
+    </motion.main>
   );
 }

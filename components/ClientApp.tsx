@@ -17,6 +17,16 @@ export function ClientApp({ providerStatus, roboflowReady }: { providerStatus: R
     return () => window.clearTimeout(timer);
   }, []);
 
+  useEffect(() => {
+    if (!("serviceWorker" in navigator) || process.env.NODE_ENV !== "production") {
+      return;
+    }
+
+    window.addEventListener("load", () => {
+      void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    }, { once: true });
+  }, []);
+
   return (
     <CapabilityGate result={capabilityResult}>
       <IndustrialVideoAnalyzer providerStatus={providerStatus} roboflowReady={roboflowReady} />
