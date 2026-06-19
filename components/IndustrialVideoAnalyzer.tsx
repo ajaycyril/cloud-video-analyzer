@@ -1872,6 +1872,7 @@ export function IndustrialVideoAnalyzer({
   const displayedCloudFrames = liveUsage.requests ? liveUsage.frames : analysis?.edgeAssessment.framesAnalyzed ?? (lastFrames.length || "--");
   const displayedLatency = liveUsage.requests ? `${liveUsage.lastLatencyMs}ms` : analysis ? `${analysis.usage.latencyMs}ms` : "--";
   const displayedCost = liveUsage.requests ? liveCostLabel : analysis ? formatCost(analysis.usage.estimatedCostUsd) : "$0.0000";
+  const topRecommendedAction = actionPreview[0] ?? null;
   const displayHeadline = analysis?.headline ?? (liveRunning ? "Gemini live commentary is running" : "Point camera or upload a clip. Ask anything.");
   const displayCommentary =
     analysis?.commentary ??
@@ -2009,68 +2010,76 @@ export function IndustrialVideoAnalyzer({
               <small>{isLiveSource ? "Live camera burst" : "Full clip keyframe scan"}</small>
             </div>
 
-            <div className="primary-record-strip">
-              <motion.button
-                aria-pressed={holdRecording}
-                className={`analyze-button first-fold-analyze ${isRecordingLocal ? "recording" : ""}`}
-                disabled={source === "camera" ? isCloudSending : analyzing}
-                whileTap={prefersReducedMotion ? undefined : { scale: 0.98 }}
-                onClick={(event) => {
-                  if (source === "camera") {
-                    event.preventDefault();
-                    if (holdRecording) {
-                      finishHoldRecording();
-                    } else {
-                      void beginHoldRecording();
+            <motion.div className={`capture-command-center ${liveRunning ? "live" : ""} ${analysis ? "ready" : ""}`} aria-label="Unified live capture and cloud feedback" layout transition={springTransition}>
+              <div className="capture-command-header">
+                <div>
+                  <span>Capture and live answer</span>
+                  <strong>{liveRunning ? "Gemini is commenting on selected live frames" : analysis ? "Latest cloud answer is ready" : "Record, stream live, or upload a clip"}</strong>
+                </div>
+                <small>{liveFrameCount || lastFrames.length} edge / {liveUsage.requests || (analysis ? 1 : 0)} cloud</small>
+              </div>
+              <div className="capture-command-actions">
+                <motion.button
+                  aria-pressed={holdRecording}
+                  className={`analyze-button first-fold-analyze ${isRecordingLocal ? "recording" : ""}`}
+                  disabled={source === "camera" ? isCloudSending : analyzing}
+                  whileTap={prefersReducedMotion ? undefined : { scale: 0.98 }}
+                  onClick={(event) => {
+                    if (source === "camera") {
+                      event.preventDefault();
+                      if (holdRecording) {
+                        finishHoldRecording();
+                      } else {
+                        void beginHoldRecording();
+                      }
+                      return;
                     }
-                    return;
-                  }
-                  void recordOrAnalyze();
-                }}
-                type="button"
-              >
-                <span className="record-dot" /> {analyzeButtonText}
-              </motion.button>
-              {isLiveSource ? (
-                <motion.button className="send-cloud-button" disabled={!canSendCloud} onClick={() => void sendLatestFramesToCloud()} type="button" whileTap={prefersReducedMotion ? undefined : { scale: 0.98 }}>
-                  Send evidence to cloud
-                  <span>{hasLocalEdgeFrames ? `${lastFrames.length} local frame${lastFrames.length === 1 ? "" : "s"} ready` : "record first"}</span>
+                    void recordOrAnalyze();
+                  }}
+                  type="button"
+                >
+                  <span className="record-dot" /> {analyzeButtonText}
                 </motion.button>
-              ) : null}
-              <small>{isLiveSource ? `Record samples edge frames locally. Send to cloud when the evidence is current.` : "One click samples the clip and sends selected evidence frames."}</small>
+                {isLiveSource ? (
+                  <motion.button className="send-cloud-button" disabled={!canSendCloud} onClick={() => void sendLatestFramesToCloud()} type="button" whileTap={prefersReducedMotion ? undefined : { scale: 0.98 }}>
+                    Send evidence to cloud
+                    <span>{hasLocalEdgeFrames ? `${lastFrames.length} local frame${lastFrames.length === 1 ? "" : "s"} ready` : "record first"}</span>
+                  </motion.button>
+                ) : null}
+                <button className={`live-command-button ${liveRunning ? "active" : ""}`} disabled={liveRunning} onClick={() => void startGeminiLive()} type="button">
+                  <Radar size={16} /> Start Gemini Live
+                </button>
+                <button className="stop-live-command" disabled={!liveRunning} onClick={stopGeminiLive} type="button">
+                  <Pause size={16} /> Stop Live
+                </button>
+              </div>
               {isLiveSource ? (
                 <div className="smart-record-progress" aria-label={`Recording progress ${recordingProgressPercent}%`}>
                   <span style={{ width: `${recordingProgressPercent}%` }} />
                 </div>
               ) : null}
-            </div>
-
-            <div className={`gemini-live-card primary-live-card ${liveRunning ? "active" : ""}`} aria-label="Gemini live camera feedback">
-              <div className="gemini-live-topline">
-                <div>
-                  <span>Live feedback</span>
-                  <strong>{liveRunning ? "Camera is live. Edge boxes stay local; selected snapshots go to Gemini." : "Start camera + Gemini commentary"}</strong>
+              <div className="command-result-preview" aria-live="polite">
+                <div className="command-result-topline">
+                  <span>{liveRunning ? liveStatus : resultStatus}</span>
+                  <strong>{analysis ? `${Math.round(analysis.confidence)}% confidence` : liveRunning ? "Live" : "Ready"}</strong>
                 </div>
-                <small>{liveFrameCount} edge / {liveUsage.requests} cloud</small>
-              </div>
-              <div className="gemini-live-actions">
-                <button disabled={liveRunning} onClick={() => void startGeminiLive()} type="button">
-                  <Radar size={16} /> Start Gemini Live
-                </button>
-                <button disabled={!liveRunning} onClick={stopGeminiLive} type="button">
-                  <Pause size={16} /> Stop Live
-                </button>
-              </div>
-              <div className="gemini-live-feed" aria-live="polite">
-                <strong>{liveStatus}</strong>
+                <h2>{displayHeadline}</h2>
+                <p>{displayCommentary}</p>
                 {(primaryLiveFeedItems.length ? primaryLiveFeedItems : ["Press Start Gemini Live. The camera opens here, edge boxes update locally, and Gemini comments on selected live snapshots."]).map((item) => (
-                  <p key={item}>{item}</p>
+                  <p className="command-live-line" key={item}>{item}</p>
                 ))}
-                <div className="gemini-live-usage" aria-label="Live Gemini usage">
-                  <span><strong>{liveCostLabel}</strong> total cost</span>
-                  <span><strong>{liveUsage.requests}</strong> Gemini call{liveUsage.requests === 1 ? "" : "s"}</span>
-                  <span><strong>{liveUsage.frames}</strong> cloud frame{liveUsage.frames === 1 ? "" : "s"}</span>
-                  <span><strong>{liveUsage.lastLatencyMs || "--"}</strong>{liveUsage.lastLatencyMs ? "ms latest" : " latency"}</span>
+                {topRecommendedAction ? (
+                  <div className="command-next-action">
+                    <span>P{topRecommendedAction.priority} / {topRecommendedAction.owner}</span>
+                    <strong>{topRecommendedAction.action}</strong>
+                    <p>{topRecommendedAction.reason}</p>
+                  </div>
+                ) : null}
+                <div className="gemini-live-usage command-usage-grid" aria-label="Live Gemini usage">
+                  <span><strong>{displayedCost}</strong> total cost</span>
+                  <span><strong>{liveUsage.requests || (analysis ? 1 : 0)}</strong> cloud call{liveUsage.requests === 1 ? "" : "s"}</span>
+                  <span><strong>{displayedCloudFrames}</strong> cloud frame{displayedCloudFrames === 1 ? "" : "s"}</span>
+                  <span><strong>{displayedLatency}</strong> latency</span>
                 </div>
                 {liveEvents.some((item) => item.startsWith("Cloud")) ? (
                   <div className="gemini-live-events">
@@ -2080,7 +2089,7 @@ export function IndustrialVideoAnalyzer({
                   </div>
                 ) : null}
               </div>
-            </div>
+            </motion.div>
 
             <motion.div className="hybrid-pipeline-strip" aria-label="Hybrid edge and cloud pipeline" layout transition={springTransition}>
               <motion.div className={running ? "active" : ""} layout transition={springTransition}>
@@ -2098,7 +2107,7 @@ export function IndustrialVideoAnalyzer({
               <small>{hybridPipelineStatus}. Edge filters the video; cloud reasons over selected evidence.</small>
             </motion.div>
 
-            <motion.div className={`scene-result-card ${analysis ? "ready" : analyzing ? "loading" : ""}`} layout transition={springTransition}>
+            <motion.div className={`scene-result-card secondary-result-card ${liveRunning ? "live-secondary" : ""} ${analysis ? "ready" : analyzing ? "loading" : ""}`} layout transition={springTransition}>
               <div className="scene-result-topline">
                 <span>{resultStatus}</span>
                 <strong>{analysis ? `${Math.round(analysis.confidence)}% confidence` : analyzing ? "Working..." : "No cloud call yet"}</strong>
