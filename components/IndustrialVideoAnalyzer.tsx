@@ -319,54 +319,6 @@ function addRecent(items: string[], next: string, limit = 6): string[] {
   return [trimmed, ...items].slice(0, limit);
 }
 
-function extractLiveMessages(payload: unknown): string[] {
-  if (!payload || typeof payload !== "object") {
-    return [];
-  }
-  const message = payload as {
-    setupComplete?: unknown;
-    serverContent?: {
-      inputTranscription?: { text?: string };
-      outputTranscription?: { text?: string };
-      modelTurn?: { parts?: Array<{ text?: string; inlineData?: { data?: string; mimeType?: string } }> };
-      turnComplete?: boolean;
-    };
-    goAway?: { timeLeft?: string };
-    toolCall?: unknown;
-  };
-
-  const messages: string[] = [];
-  if (message.setupComplete !== undefined) {
-    messages.push("Live session ready. Streaming sampled frames now.");
-  }
-  const serverContent = message.serverContent;
-  const inputText = serverContent?.inputTranscription?.text;
-  if (inputText) {
-    messages.push(`Heard: ${inputText}`);
-  }
-  const outputText = serverContent?.outputTranscription?.text;
-  if (outputText) {
-    messages.push(outputText);
-  }
-  for (const part of serverContent?.modelTurn?.parts ?? []) {
-    if (part.text) {
-      messages.push(part.text);
-    } else if (part.inlineData?.data) {
-      messages.push("Gemini returned an audio response; waiting for text transcription.");
-    }
-  }
-  if (serverContent?.turnComplete) {
-    messages.push("Live turn complete.");
-  }
-  if (message.goAway?.timeLeft) {
-    messages.push(`Live session ending soon: ${message.goAway.timeLeft}`);
-  }
-  if (message.toolCall) {
-    messages.push("Gemini requested a tool call.");
-  }
-  return messages;
-}
-
 function waitForVideoData(video: HTMLVideoElement): Promise<void> {
   if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
     return Promise.resolve();
@@ -464,7 +416,7 @@ export function IndustrialVideoAnalyzer({
   const [lastFrames, setLastFrames] = useState<SampledFrame[]>([]);
   const [analysesUsed, setAnalysesUsed] = useState(initialAnalysesUsed);
   const [videoOrientation, setVideoOrientation] = useState<VideoOrientation>("landscape-video");
-  const [liveStatus, setLiveStatus] = useState("Gemini Live idle");
+  const [liveStatus, setLiveStatus] = useState("Live edge camera idle");
   const [liveRunning, setLiveRunning] = useState(false);
   const [liveEvents, setLiveEvents] = useState<string[]>([]);
   const [liveTranscript, setLiveTranscript] = useState<string[]>([]);
@@ -639,7 +591,7 @@ export function IndustrialVideoAnalyzer({
     liveStreamingStartedRef.current = false;
     liveStartedAtRef.current = 0;
     setLiveRunning(false);
-    setLiveStatus("Gemini Live stopped with camera");
+    setLiveStatus("Live edge camera stopped with camera");
     holdRecordingRef.current.active = false;
     holdRecordingRef.current.stopRequested = true;
     setHoldRecording(false);
@@ -1123,6 +1075,25 @@ export function IndustrialVideoAnalyzer({
     }
   }, [sampleFrames, submitFramesForAnalysis]);
 
+  const sendLatestFramesToCloud = useCallback(async () => {
+    if (analyzing || holdRecordingRef.current.active) {
+      return false;
+    }
+    if (!lastFrames.length) {
+      setError("Record a local edge burst first. The cloud button sends only selected edge frames, not the live stream.");
+      setStatus("cloud send blocked - no local edge frames");
+      return false;
+    }
+    setAnalyzing(true);
+    setError(null);
+    setStatus("sending selected edge frames to cloud");
+    try {
+      return await submitFramesForAnalysis(lastFrames);
+    } finally {
+      setAnalyzing(false);
+    }
+  }, [analyzing, lastFrames, submitFramesForAnalysis]);
+
   const beginHoldRecording = useCallback(async (event?: PointerEvent<HTMLButtonElement>) => {
     if (source !== "camera" || analyzing || holdRecordingRef.current.active) {
       return;
@@ -1156,8 +1127,7 @@ export function IndustrialVideoAnalyzer({
         throw new Error("Video element is not ready.");
       }
       await waitForVideoData(video);
-      const detectorRuntime = await tryCreateObjectDetector();
-      setDetectorStatus(detectorRuntime.label);
+      void tryCreateObjectDetector().then((detectorRuntime) => setDetectorStatus(detectorRuntime.label));
       previousFrameRef.current = null;
       setStatus("smart recording - edge boxes live");
 
@@ -1193,12 +1163,14 @@ export function IndustrialVideoAnalyzer({
       }
 
       const frames = holdRecordingRef.current.frames;
+      const edgeSelection = selectEdgeTriggeredFrames(frames, MAX_CLOUD_FRAMES, { allowFallback: forceCloudAnalysis });
       holdRecordingRef.current.active = false;
       holdRecordingRef.current.stopRequested = false;
       holdRecordingRef.current.pointerId = null;
       setHoldRecording(false);
       setRecordingProgress(1);
-      await submitFramesForAnalysis(frames);
+      setEdgeGateSummary(edgeSelection.summary);
+      setStatus(`local edge burst ready - ${frames.length} frame${frames.length === 1 ? "" : "s"} captured, ${edgeSelection.summary.selectedFrames} would go to cloud`);
     } catch (recordError) {
       holdRecordingRef.current.active = false;
       holdRecordingRef.current.stopRequested = false;
@@ -1211,7 +1183,7 @@ export function IndustrialVideoAnalyzer({
       setAnalyzing(false);
       setRecordingProgress(0);
     }
-  }, [analyzing, captureOneFrame, running, source, startCamera, submitFramesForAnalysis]);
+  }, [analyzing, captureOneFrame, forceCloudAnalysis, running, source, startCamera]);
 
   const finishHoldRecording = useCallback((event?: PointerEvent<HTMLButtonElement>) => {
     if (event) {
@@ -1222,7 +1194,7 @@ export function IndustrialVideoAnalyzer({
     }
     holdRecordingRef.current.stopRequested = true;
     holdRecordingRef.current.pointerId = null;
-    setStatus("recording stopped - preparing cloud enhancement");
+    setStatus("recording stopped - local edge frames ready");
   }, []);
 
   const recordOrAnalyze = useCallback(async () => {
@@ -1272,11 +1244,11 @@ export function IndustrialVideoAnalyzer({
     liveStreamingStartedRef.current = false;
     liveStartedAtRef.current = 0;
     setLiveRunning(false);
-    setLiveStatus("Gemini Live stopped");
+    setLiveStatus("Live edge camera stopped");
   }, []);
 
   const startGeminiLive = useCallback(async () => {
-    const startLocalLiveFallback = (reason: string) => {
+    const startLocalLiveStream = (reason: string) => {
       if (liveTimerRef.current) {
         window.clearInterval(liveTimerRef.current);
         liveTimerRef.current = null;
@@ -1321,10 +1293,10 @@ export function IndustrialVideoAnalyzer({
     setLiveFrameCount(0);
     liveStreamingStartedRef.current = false;
     liveStartedAtRef.current = 0;
-    setLiveStatus("minting ephemeral token");
+    setLiveStatus("starting live edge camera");
     try {
       if (source !== "camera" || !running) {
-        setLiveStatus(`starting ${cameraFacing === "environment" ? "back" : "front"} camera for Live`);
+        setLiveStatus(`starting ${cameraFacing === "environment" ? "back" : "front"} camera`);
         await startCamera(cameraFacing, null);
       }
       const video = videoRef.current;
@@ -1332,136 +1304,14 @@ export function IndustrialVideoAnalyzer({
         throw new Error("Video element is not ready.");
       }
       await waitForVideoData(video);
-
-      if (!providerStatus.gemini) {
-        startLocalLiveFallback("Gemini Live key is not configured.");
-        return;
-      }
-
-      const tokenResponse = await fetch("/api/gemini-live-token", { method: "POST" });
-      const tokenPayload = (await tokenResponse.json()) as { token?: string; model?: string; detail?: string; error?: string };
-      if (!tokenResponse.ok || !tokenPayload.token || !tokenPayload.model) {
-        throw new Error(tokenPayload.detail ?? tokenPayload.error ?? "Could not create Gemini Live token.");
-      }
-
-      const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token=${encodeURIComponent(tokenPayload.token)}`;
-      const websocket = new WebSocket(wsUrl);
-      liveSocketRef.current = websocket;
-      setLiveStatus("connecting to Gemini Live");
-
-      const startFramePump = () => {
-        if (liveStreamingStartedRef.current) {
-          return;
-        }
-        liveStreamingStartedRef.current = true;
-        liveStartedAtRef.current = performance.now();
-        websocket.send(
-          JSON.stringify({
-            realtimeInput: {
-              text: `Act as a continuous live camera video analytics commentator. Objective: ${objective}. Watch the incoming JPEG frames until Stop Live is pressed. Respond whenever visible evidence changes with concise scene observations, detected objects, alerts, and recommended actions. Zones: ${zones.map((zone) => `${zone.id} ${zone.label}`).join(", ") || "none"}.`,
-            },
-          }),
-        );
-        setLiveRunning(true);
-        setStatus("Gemini Live camera stream active - press Stop Live to end");
-        setLiveStatus("Gemini Live active - continuous camera stream");
-        setLiveTranscript((items) => addRecent(items, "Live camera is on. Sending one sampled JPEG frame per second until Stop Live."));
-
-        const sendLiveFrame = async () => {
-          if (!liveStreamingStartedRef.current || websocket.readyState !== WebSocket.OPEN) {
-            return;
-          }
-          const timestampMs = Math.max(0, performance.now() - liveStartedAtRef.current);
-          const frame = await captureOneFrame(timestampMs);
-          if (frame && websocket.readyState === WebSocket.OPEN) {
-            websocket.send(
-              JSON.stringify({
-                realtimeInput: {
-                  video: {
-                    data: frame.imageDataUrl.slice(frame.imageDataUrl.indexOf(",") + 1),
-                    mimeType: "image/jpeg",
-                  },
-                },
-              }),
-            );
-            setLastFrames((frames) => [...frames, frame].slice(-MAX_FRAMES));
-            setLiveFrameCount((count) => count + 1);
-            setLiveEvents((items) => addRecent(items, `sent frame ${new Date().toLocaleTimeString([], { minute: "2-digit", second: "2-digit" })}`, 4));
-            if (frame.localDetections.length) {
-              const labels = frame.localDetections.slice(0, 3).map((detection) => detection.label).join(", ");
-              setLiveTranscript((items) => addRecent(items, `Local live frame: ${labels} visible. Waiting for Gemini commentary.`));
-            }
-          }
-        };
-
-        void sendLiveFrame();
-        liveTimerRef.current = window.setInterval(() => {
-          void sendLiveFrame();
-        }, 1000);
-      };
-
-      websocket.onopen = () => {
-        websocket.send(
-          JSON.stringify({
-            setup: {
-              model: `models/${tokenPayload.model}`,
-              responseModalities: ["AUDIO"],
-              outputAudioTranscription: {},
-              systemInstruction: {
-                parts: [
-                  {
-                    text: "You are an industrial live video analytics assistant. Watch streamed frames, follow the user's analytics objective, and respond concisely with visible evidence, recommended actions, and uncertainty when the scene is unclear.",
-                  },
-                ],
-              },
-            },
-          }),
-        );
-        setLiveStatus("Gemini Live connected - waiting for setup");
-      };
-
-      websocket.onmessage = (event) => {
-        if (typeof event.data !== "string") {
-          setLiveEvents((items) => addRecent(items, "received binary live response", 4));
-          return;
-        }
-        try {
-          const payload: unknown = JSON.parse(event.data);
-          if (payload && typeof payload === "object" && "setupComplete" in payload) {
-            startFramePump();
-          }
-          const messages = extractLiveMessages(payload);
-          if (messages.length) {
-            setLiveTranscript((items) => messages.reduce((nextItems, message) => addRecent(nextItems, message), items));
-          } else {
-            setLiveEvents((items) => addRecent(items, "received live server event", 4));
-          }
-        } catch {
-          setLiveEvents((items) => addRecent(items, event.data.slice(0, 120), 4));
-        }
-      };
-
-      websocket.onerror = () => {
-        websocket.onclose = null;
-        liveSocketRef.current?.close();
-        liveSocketRef.current = null;
-        startLocalLiveFallback("Gemini Live websocket failed.");
-      };
-
-      websocket.onclose = () => {
-        if (liveTimerRef.current) {
-          window.clearInterval(liveTimerRef.current);
-          liveTimerRef.current = null;
-        }
-        liveStreamingStartedRef.current = false;
-        liveStartedAtRef.current = 0;
-        setLiveRunning(false);
-        setLiveStatus("Gemini Live closed");
-      };
+      startLocalLiveStream("Live edge camera started.");
     } catch (liveError) {
-      startLocalLiveFallback(`Gemini Live unavailable: ${readableError(liveError)}`);
+      setLiveRunning(false);
+      setLiveStatus("Live camera error");
+      setError(readableError(liveError));
+      setLiveTranscript((items) => addRecent(items, readableError(liveError)));
     }
-  }, [cameraFacing, captureOneFrame, objective, providerStatus.gemini, running, source, startCamera, zones]);
+  }, [cameraFacing, captureOneFrame, running, source, startCamera]);
 
   const applyPreset = useCallback((preset: (typeof OBJECTIVE_PRESETS)[number]) => {
     setMode(preset.mode);
@@ -1564,6 +1414,8 @@ export function IndustrialVideoAnalyzer({
     ? "Record live scene"
     : `Ask ${providerLabel} about this clip`;
   const cameraFacingLabel = cameraFacing === "environment" ? "Back camera" : "Front camera";
+  const hasLocalEdgeFrames = lastFrames.length > 0;
+  const canSendCloud = hasLocalEdgeFrames && !analyzing && !holdRecording;
   const cameraCaptureState = isCloudSending
     ? "Sending sampled frames to cloud"
     : analyzing
@@ -1581,7 +1433,7 @@ export function IndustrialVideoAnalyzer({
     ? "Cloud request running. Hold this view until the response returns."
     : analyzing
       ? isLiveSource
-        ? `Recording locally. Browser boxes and motion gate decide which frames go to cloud.`
+        ? `Recording locally only. Press Send to cloud after edge frames are ready.`
         : `Sampling keyframes across the clip. Full video stays local.`
       : analysis
         ? "Cloud response received. Adjust the prompt or scene, then analyze again."
@@ -1608,7 +1460,7 @@ export function IndustrialVideoAnalyzer({
       ? "Selected JPEG frames are being analyzed."
       : analyzing
         ? isLiveSource
-          ? "Edge boxes update live; cloud enhancement runs automatically."
+          ? "Edge boxes update live; cloud waits for your explicit click."
           : "Keep the scene steady while the browser samples frames."
         : analysis
           ? "Result card has the latest scene output."
@@ -1766,7 +1618,13 @@ export function IndustrialVideoAnalyzer({
               >
                 <span className="record-dot" /> {analyzeButtonText}
               </button>
-              <small>{isLiveSource ? `Tap once. Edge boxes update live for up to ${Math.round(SMART_RECORDING_MAX_MS / 1000)}s, then selected frames and object metadata go to cloud.` : "Click once to sample this clip and send selected frames."}</small>
+              {isLiveSource ? (
+                <button className="send-cloud-button" disabled={!canSendCloud} onClick={() => void sendLatestFramesToCloud()} type="button">
+                  Send selected frames to cloud
+                  <span>{hasLocalEdgeFrames ? `${lastFrames.length} local frame${lastFrames.length === 1 ? "" : "s"} ready` : "record first"}</span>
+                </button>
+              ) : null}
+              <small>{isLiveSource ? `Step 1: record local edge boxes. Step 2: click cloud when the evidence looks right.` : "Click once to sample this clip and send selected frames."}</small>
               {isLiveSource ? (
                 <div className="smart-record-progress" aria-label={`Recording progress ${recordingProgressPercent}%`}>
                   <span style={{ width: `${recordingProgressPercent}%` }} />
@@ -1780,7 +1638,7 @@ export function IndustrialVideoAnalyzer({
                 <strong>{analysis ? `${Math.round(analysis.confidence)}% confidence` : analyzing ? "Working..." : "No cloud call yet"}</strong>
               </div>
               <h2>{analysis?.headline ?? "Point camera, record, get the answer here"}</h2>
-              <p>{analysis?.commentary ?? "Hold the red record button, point at the scene, release, and the answer appears here. No background polling."}</p>
+              <p>{analysis?.commentary ?? "Start live edge or record a short local burst. When the boxes look useful, press Send selected frames to cloud for Gemini/OpenAI reasoning."}</p>
               <div className={`priority-actions-panel ${actionPreview.length ? "ready" : ""}`} aria-label="Recommended actions">
                 <div className="priority-actions-heading">
                   <span>Recommended actions</span>
@@ -1945,14 +1803,14 @@ export function IndustrialVideoAnalyzer({
             <div className={`gemini-live-card ${liveRunning ? "active" : ""}`}>
               <div className="gemini-live-topline">
                 <div>
-                  <span>Gemini Live commentary</span>
-                  <strong>{liveRunning ? "Live camera streaming" : "Start continuous camera stream"}</strong>
+                  <span>Live edge camera</span>
+                  <strong>{liveRunning ? "Local edge stream running" : "Start live local stream"}</strong>
                 </div>
                 <small>{liveFrameCount} frame{liveFrameCount === 1 ? "" : "s"}</small>
               </div>
               <div className="gemini-live-actions">
-                <button disabled={liveRunning || !providerStatus.gemini} onClick={() => void startGeminiLive()} type="button">
-                  <Radar size={16} /> Start Live Camera
+                <button disabled={liveRunning} onClick={() => void startGeminiLive()} type="button">
+                  <Radar size={16} /> Start Live Edge
                 </button>
                 <button disabled={!liveRunning} onClick={stopGeminiLive} type="button">
                   <Pause size={16} /> Stop Live
@@ -1960,7 +1818,7 @@ export function IndustrialVideoAnalyzer({
               </div>
               <div className="gemini-live-feed" aria-live="polite">
                 <strong>{liveStatus}</strong>
-                {(liveTranscript.length ? liveTranscript : ["Start Live Camera to open the camera and stream sampled frames continuously until Stop Live."]).map((item) => (
+                {(liveTranscript.length ? liveTranscript : ["Start Live Edge to open the camera, draw live boxes, and collect local evidence. Use Send selected frames to cloud for Gemini/OpenAI reasoning."]).map((item) => (
                   <p key={item}>{item}</p>
                 ))}
                 {liveEvents.length ? (
@@ -2000,7 +1858,7 @@ export function IndustrialVideoAnalyzer({
           </div>
 
           <p className="panel-note">
-            Camera mode sends one request after you release the record button. Full video stays in the browser; only object/motion-triggered JPEG keyframes are sent.
+            Camera mode records local edge evidence first. Cloud analysis only runs when you press Send selected frames to cloud. Full video stays in the browser; only object/motion-triggered JPEG keyframes are sent.
             Upload mode works without camera access on Safari, Edge, Chrome, and desktop browsers that support video canvas extraction.
           </p>
         </div>
