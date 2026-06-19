@@ -1,4 +1,5 @@
 import type { VideoAnalysisRequest } from "./videoSchema";
+import { summarizeHybridEdgeContext } from "./hybridEdgeContext";
 
 export const VIDEO_ANALYTICS_SYSTEM_PROMPT = [
   "You are a senior multimodal video analyst for physical AI demos.",
@@ -18,14 +19,7 @@ const modeFocus: Record<VideoAnalysisRequest["mode"], string> = {
 };
 
 export function buildVideoAnalysisPrompt(request: VideoAnalysisRequest): string {
-  const localObjects = request.frames
-    .flatMap((frame, frameIndex) =>
-      frame.localDetections.map(
-        (detection) =>
-          `frame ${frameIndex + 1}: ${detection.label} ${(detection.score * 100).toFixed(0)}% at x=${detection.x.toFixed(2)}, y=${detection.y.toFixed(2)}`,
-      ),
-    )
-    .slice(0, 24);
+  const hybridContext = summarizeHybridEdgeContext(request.frames);
 
   const edgeSummary = request.frames
     .map(
@@ -59,9 +53,16 @@ export function buildVideoAnalysisPrompt(request: VideoAnalysisRequest): string 
     request.sampling.edgeGate
       ? `Two-step edge gate: ${request.sampling.edgeGate.strategy}. Browser captured ${request.sampling.edgeGate.inputFrames} frames, selected ${request.sampling.edgeGate.selectedFrames}, skipped ${request.sampling.edgeGate.skippedFrames}, object frames ${request.sampling.edgeGate.objectFrames}, motion frames ${request.sampling.edgeGate.motionFrames}.`
       : "Two-step edge gate: not reported by this client.",
+    `Hybrid edge context sent to cloud: ${hybridContext.detections} browser object box${hybridContext.detections === 1 ? "" : "es"} across ${hybridContext.objectFrames}/${hybridContext.frames} object-triggered frame${hybridContext.objectFrames === 1 ? "" : "s"}, ${hybridContext.motionFrames} motion-triggered frame${hybridContext.motionFrames === 1 ? "" : "s"}, ${hybridContext.usableFrames} usable frame${hybridContext.usableFrames === 1 ? "" : "s"}. Use these local detections as cost-saving hints, then verify against the attached images before making claims.`,
+    hybridContext.objects.length
+      ? `Edge object summary: ${hybridContext.objects
+          .slice(0, 10)
+          .map((object) => `${object.label} x${object.count} best ${(object.bestScore * 100).toFixed(0)}%`)
+          .join(", ")}.`
+      : "Edge object summary: no browser detections above threshold.",
     "Edge metrics per frame:",
     edgeSummary,
-    localObjects.length ? "Local browser detections:\n" + localObjects.join("\n") : "Local browser detections: none above threshold.",
+    hybridContext.promptLines.length ? "Local browser detections sent as metadata:\n" + hybridContext.promptLines.join("\n") : "Local browser detections sent as metadata: none above threshold.",
     "Return a practical answer suitable for a live demo. The headline and commentary should read like a direct answer to the user's plain-language question.",
     alertInstruction,
     "Keep commentary punchy enough for live narration.",

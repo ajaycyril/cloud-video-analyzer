@@ -3,8 +3,9 @@ import type { LocalDetection } from "./types";
 
 const MODEL_PATH = "/models/efficientdet_lite0.tflite";
 const WASM_PATH = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
-const MIN_DETECTION_SCORE = 0.45;
-const MIN_BOX_AREA = 0.004;
+const MIN_DETECTION_SCORE = 0.55;
+const SPECIFIC_LABEL_SCORE = 0.68;
+const MIN_BOX_AREA = 0.006;
 const MAX_DETECTIONS = 8;
 
 let detectorPromise: Promise<ObjectDetector> | null = null;
@@ -98,9 +99,11 @@ export function mapDetections(result: ObjectDetectorResult, video: HTMLVideoElem
     .map((detection) => {
       const category = detection.categories[0];
       const box = detection.boundingBox;
+      const score = Math.max(0, Math.min(1, category?.score ?? 0));
+      const label = category?.categoryName && score >= SPECIFIC_LABEL_SCORE ? category.categoryName : "object candidate";
       return {
-        label: category?.categoryName ?? "object",
-        score: Math.max(0, Math.min(1, category?.score ?? 0)),
+        label,
+        score,
         x: normalize(box?.originX ?? 0, videoWidth),
         y: normalize(box?.originY ?? 0, videoHeight),
         w: normalize(box?.width ?? 0, videoWidth),

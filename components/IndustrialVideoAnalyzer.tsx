@@ -2,10 +2,11 @@
 
 import { AlertTriangle, Camera, Crosshair, FileVideo, Pause, Play, Radar, RotateCcw } from "lucide-react";
 import Image from "next/image";
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent } from "react";
 import { buildVideoConstraints, listVideoInputDevices, stopStream, type CameraFacing } from "@/lib/camera";
 import { selectEdgeTriggeredFrames, type EdgeGateSummary } from "@/lib/edgeFrameGate";
 import { canvasToJpegDataUrl, captureVideoFrame, computeEdgeMetrics, type EdgeMetricResult } from "@/lib/edgeMetrics";
+import { summarizeHybridEdgeContext } from "@/lib/hybridEdgeContext";
 import { detectObjectsForVideo, tryCreateObjectDetector } from "@/lib/mediaPipeDetector";
 import { fallbackObjectChips, summarizeEdgeDetections } from "@/lib/resultPresentation";
 import type { LocalDetection } from "@/lib/types";
@@ -24,6 +25,12 @@ type RoboflowDetectResponse = {
 
 type ZoneCorner = "nw" | "ne" | "sw" | "se";
 type VideoOrientation = "landscape-video" | "portrait-video";
+type VideoViewport = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
 type ZoneInteraction =
   | { kind: "draw"; start: { x: number; y: number } }
   | { kind: "resize"; corner: ZoneCorner; zone: Zone };
@@ -39,6 +46,12 @@ type HoldRecording = {
 const MAX_FRAMES = 5;
 const MAX_CLOUD_FRAMES = 3;
 const CAMERA_CAPTURE_WINDOW_MS = 2000;
+const PREVIEW_DETECTION_INTERVAL_MS = 220;
+const SMART_RECORDING_MIN_MS = 1800;
+const SMART_RECORDING_MAX_MS = 4200;
+const SMART_RECORDING_INTERVAL_MS = 360;
+const EDGE_MOTION_TRIGGER_SCORE = 8;
+const EDGE_OBJECT_TRIGGER_SCORE = 0.5;
 const JPEG_QUALITY = 0.58;
 const DEMO_ANALYSIS_LIMIT = Number(process.env.NEXT_PUBLIC_DEMO_ANALYSIS_LIMIT ?? 20);
 
@@ -208,6 +221,15 @@ function safelyReleasePointerCapture(element: Element, pointerId: number): void 
   }
 }
 
+function overlayStyleForDetection(detection: LocalDetection, viewport: VideoViewport): CSSProperties {
+  return {
+    left: `${viewport.x + detection.x * viewport.w}%`,
+    top: `${viewport.y + detection.y * viewport.h}%`,
+    width: `${detection.w * viewport.w}%`,
+    height: `${detection.h * viewport.h}%`,
+  };
+}
+
 function addRecent(items: string[], next: string, limit = 6): string[] {
   const trimmed = next.trim();
   if (!trimmed) {
@@ -326,6 +348,10 @@ export function IndustrialVideoAnalyzer({
   const liveTimerRef = useRef<number | null>(null);
   const liveStreamingStartedRef = useRef(false);
   const liveStartedAtRef = useRef(0);
+  const previewDetectionFrameRef = useRef<number | null>(null);
+  const previewDetectionBusyRef = useRef(false);
+  const lastPreviewDetectionAtRef = useRef(0);
+  const latestPreviewDetectionsRef = useRef<LocalDetection[]>([]);
   const previousFrameRef = useRef<EdgeMetricResult["snapshot"] | null>(null);
   const zoneInteractionRef = useRef<ZoneInteraction | null>(null);
   const holdRecordingRef = useRef<HoldRecording>({
@@ -350,6 +376,7 @@ export function IndustrialVideoAnalyzer({
   const [running, setRunning] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [holdRecording, setHoldRecording] = useState(false);
+  const [recordingProgress, setRecordingProgress] = useState(0);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [cameraFacing, setCameraFacing] = useState<CameraFacing>("environment");
@@ -366,6 +393,12 @@ export function IndustrialVideoAnalyzer({
   const [detectorStatus, setDetectorStatus] = useState(roboflowReady ? "Roboflow specialist detector ready" : "Browser detector active");
   const [edgeGateSummary, setEdgeGateSummary] = useState<EdgeGateSummary | null>(null);
   const [forceCloudAnalysis, setForceCloudAnalysis] = useState(true);
+  const [previewDetections, setPreviewDetections] = useState<LocalDetection[]>([]);
+  const [edgePreviewMetrics, setEdgePreviewMetrics] = useState<EdgeMetricResult["metrics"] | null>(null);
+  const [edgePreviewFrameCount, setEdgePreviewFrameCount] = useState(0);
+  const [edgeDetectionLatencyMs, setEdgeDetectionLatencyMs] = useState(0);
+  const [edgeLoopFps, setEdgeLoopFps] = useState(0);
+  const [videoViewport, setVideoViewport] = useState<VideoViewport>({ x: 0, y: 0, w: 100, h: 100 });
 
   useEffect(() => {
     return () => {
@@ -373,6 +406,9 @@ export function IndustrialVideoAnalyzer({
       holdRecordingRef.current.stopRequested = true;
       if (liveTimerRef.current) {
         window.clearInterval(liveTimerRef.current);
+      }
+      if (previewDetectionFrameRef.current) {
+        window.cancelAnimationFrame(previewDetectionFrameRef.current);
       }
       liveSocketRef.current?.close();
       stopStream(streamRef.current);
@@ -385,6 +421,24 @@ export function IndustrialVideoAnalyzer({
   useEffect(() => {
     analysesUsedRef.current = analysesUsed;
   }, [analysesUsed]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const warmDetector = () => {
+      setDetectorStatus((current) => (current.includes("active") ? current : "Warming browser edge detector"));
+      void tryCreateObjectDetector().then((runtime) => {
+        if (!cancelled) {
+          setDetectorStatus(runtime.label);
+        }
+      });
+    };
+
+    const timerId = window.setTimeout(warmDetector, 400);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerId);
+    };
+  }, []);
 
   const refreshDevices = useCallback(async () => {
     const nextDevices = await listVideoInputDevices();
@@ -401,13 +455,45 @@ export function IndustrialVideoAnalyzer({
     }
   }, []);
 
+  const updateVideoViewport = useCallback(() => {
+    const video = videoRef.current;
+    const frame = videoFrameRef.current;
+    if (!video?.videoWidth || !video.videoHeight || !frame) {
+      setVideoViewport({ x: 0, y: 0, w: 100, h: 100 });
+      return;
+    }
+    const frameRect = frame.getBoundingClientRect();
+    if (!frameRect.width || !frameRect.height) {
+      return;
+    }
+    const scale =
+      source === "camera"
+        ? Math.max(frameRect.width / video.videoWidth, frameRect.height / video.videoHeight)
+        : Math.min(frameRect.width / video.videoWidth, frameRect.height / video.videoHeight);
+    const renderedWidth = video.videoWidth * scale;
+    const renderedHeight = video.videoHeight * scale;
+    setVideoViewport({
+      x: ((frameRect.width - renderedWidth) / 2 / frameRect.width) * 100,
+      y: ((frameRect.height - renderedHeight) / 2 / frameRect.height) * 100,
+      w: (renderedWidth / frameRect.width) * 100,
+      h: (renderedHeight / frameRect.height) * 100,
+    });
+  }, [source]);
+
   const updateVideoOrientation = useCallback(() => {
     const video = videoRef.current;
     if (!video?.videoWidth || !video.videoHeight) {
       return;
     }
     setVideoOrientation(video.videoHeight > video.videoWidth ? "portrait-video" : "landscape-video");
-  }, []);
+    updateVideoViewport();
+  }, [updateVideoViewport]);
+
+  useEffect(() => {
+    updateVideoViewport();
+    window.addEventListener("resize", updateVideoViewport);
+    return () => window.removeEventListener("resize", updateVideoViewport);
+  }, [updateVideoViewport]);
 
   const warmVideoElement = useCallback(async () => {
     const video = videoRef.current;
@@ -450,6 +536,10 @@ export function IndustrialVideoAnalyzer({
       updateVideoOrientation();
       await refreshDevices();
       previousFrameRef.current = null;
+      setEdgePreviewMetrics(null);
+      setEdgePreviewFrameCount(0);
+      setEdgeDetectionLatencyMs(0);
+      setEdgeLoopFps(0);
       setRunning(true);
       setStatus(`preview only - ${nextFacing === "environment" ? "back" : "front"} camera - no cloud upload`);
     } catch (startError) {
@@ -473,7 +563,14 @@ export function IndustrialVideoAnalyzer({
     holdRecordingRef.current.active = false;
     holdRecordingRef.current.stopRequested = true;
     setHoldRecording(false);
+    setRecordingProgress(0);
     setRunning(false);
+    setPreviewDetections([]);
+    latestPreviewDetectionsRef.current = [];
+    setEdgePreviewMetrics(null);
+    setEdgePreviewFrameCount(0);
+    setEdgeDetectionLatencyMs(0);
+    setEdgeLoopFps(0);
     setStatus("camera off - no recording");
     stopStream(streamRef.current);
     streamRef.current = null;
@@ -481,6 +578,96 @@ export function IndustrialVideoAnalyzer({
       videoRef.current.srcObject = null;
     }
   }, []);
+
+  useEffect(() => {
+    if (previewDetectionFrameRef.current) {
+      window.cancelAnimationFrame(previewDetectionFrameRef.current);
+      previewDetectionFrameRef.current = null;
+    }
+    previewDetectionBusyRef.current = false;
+
+    if (source !== "camera" || !running || liveRunning) {
+      setPreviewDetections([]);
+      latestPreviewDetectionsRef.current = [];
+      return;
+    }
+
+    let cancelled = false;
+    lastPreviewDetectionAtRef.current = 0;
+
+    const runPreviewDetection = async (now: number) => {
+      if (previewDetectionBusyRef.current) {
+        return;
+      }
+      const video = videoRef.current;
+      if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        return;
+      }
+      previewDetectionBusyRef.current = true;
+      const detectionStartedAt = performance.now();
+      try {
+        const runtime = await tryCreateObjectDetector();
+        if (!cancelled) {
+          setDetectorStatus(runtime.label);
+        }
+        const canvas = canvasRef.current;
+        if (canvas) {
+          const imageData = captureVideoFrame(video, canvas, 360);
+          if (imageData) {
+            const result = computeEdgeMetrics(imageData, previousFrameRef.current);
+            previousFrameRef.current = result.snapshot;
+            if (!cancelled) {
+              setEdgePreviewMetrics(result.metrics);
+              setEdgePreviewFrameCount((count) => count + 1);
+            }
+          }
+        }
+        const detections = await detectObjectsForVideo(video, now);
+        if (!cancelled) {
+          setPreviewDetections(detections);
+          latestPreviewDetectionsRef.current = detections;
+          setEdgeDetectionLatencyMs(Math.round(performance.now() - detectionStartedAt));
+          updateVideoViewport();
+        }
+      } catch {
+        if (!cancelled) {
+          setDetectorStatus("Browser edge detector unavailable");
+        }
+      } finally {
+        previewDetectionBusyRef.current = false;
+      }
+    };
+
+    const tick = (now: number) => {
+      if (cancelled) {
+        return;
+      }
+      const elapsedSinceDetection = now - lastPreviewDetectionAtRef.current;
+      if (!previewDetectionBusyRef.current && elapsedSinceDetection >= PREVIEW_DETECTION_INTERVAL_MS) {
+        const previousDetectionAt = lastPreviewDetectionAtRef.current;
+        lastPreviewDetectionAtRef.current = now;
+        void runPreviewDetection(now).finally(() => {
+          if (!cancelled) {
+            setEdgeLoopFps(previousDetectionAt ? Math.round(1000 / Math.max(1, now - previousDetectionAt)) : 0);
+            previewDetectionFrameRef.current = window.requestAnimationFrame(tick);
+          }
+        });
+        return;
+      }
+      previewDetectionFrameRef.current = window.requestAnimationFrame(tick);
+    };
+
+    previewDetectionFrameRef.current = window.requestAnimationFrame(tick);
+
+    return () => {
+      cancelled = true;
+      if (previewDetectionFrameRef.current) {
+        window.cancelAnimationFrame(previewDetectionFrameRef.current);
+        previewDetectionFrameRef.current = null;
+      }
+      previewDetectionBusyRef.current = false;
+    };
+  }, [liveRunning, running, source, updateVideoViewport]);
 
   const switchCamera = useCallback(async () => {
     const nextFacing: CameraFacing = cameraFacing === "environment" ? "user" : "environment";
@@ -504,6 +691,12 @@ export function IndustrialVideoAnalyzer({
       const objectUrl = URL.createObjectURL(file);
       objectUrlRef.current = objectUrl;
       setSource("file");
+      setPreviewDetections([]);
+      latestPreviewDetectionsRef.current = [];
+      setEdgePreviewMetrics(null);
+      setEdgePreviewFrameCount(0);
+      setEdgeDetectionLatencyMs(0);
+      setEdgeLoopFps(0);
       if (videoRef.current) {
         videoRef.current.crossOrigin = "";
         videoRef.current.srcObject = null;
@@ -528,6 +721,12 @@ export function IndustrialVideoAnalyzer({
     streamRef.current = null;
     clearVideoObjectUrl();
     setSource("sample");
+    setPreviewDetections([]);
+    latestPreviewDetectionsRef.current = [];
+    setEdgePreviewMetrics(null);
+    setEdgePreviewFrameCount(0);
+    setEdgeDetectionLatencyMs(0);
+    setEdgeLoopFps(0);
     if (videoRef.current) {
       videoRef.current.crossOrigin = "anonymous";
       videoRef.current.srcObject = null;
@@ -550,6 +749,12 @@ export function IndustrialVideoAnalyzer({
       streamRef.current = null;
       clearVideoObjectUrl();
       setSource("sample");
+      setPreviewDetections([]);
+      latestPreviewDetectionsRef.current = [];
+      setEdgePreviewMetrics(null);
+      setEdgePreviewFrameCount(0);
+      setEdgeDetectionLatencyMs(0);
+      setEdgeLoopFps(0);
       if (videoRef.current) {
         videoRef.current.crossOrigin = "anonymous";
         videoRef.current.srcObject = null;
@@ -578,21 +783,31 @@ export function IndustrialVideoAnalyzer({
 
     const result = computeEdgeMetrics(imageData, previousFrameRef.current);
     previousFrameRef.current = result.snapshot;
+    setEdgePreviewMetrics(result.metrics);
+    setEdgePreviewFrameCount((count) => count + 1);
 
     let localDetections: LocalDetection[] = [];
-    try {
-      localDetections = await detectObjectsForVideo(video, performance.now());
-    } catch {
-      localDetections = [];
+    if (source === "camera") {
+      localDetections = latestPreviewDetectionsRef.current;
+    } else {
+      try {
+        localDetections = await detectObjectsForVideo(video, performance.now());
+        setPreviewDetections(localDetections);
+        latestPreviewDetectionsRef.current = localDetections;
+        updateVideoViewport();
+      } catch {
+        localDetections = [];
+      }
     }
 
-    return {
+    const frame = {
       imageDataUrl: canvasToJpegDataUrl(canvas, JPEG_QUALITY),
       timestampMs,
       edgeMetrics: result.metrics,
       localDetections,
     };
-  }, []);
+    return frame;
+  }, [source, updateVideoViewport]);
 
   const seekVideo = useCallback((seconds: number) => {
     return new Promise<void>((resolve, reject) => {
@@ -806,6 +1021,8 @@ export function IndustrialVideoAnalyzer({
     setError(null);
     setAnalysis(null);
     setEdgeGateSummary(null);
+    setEdgePreviewFrameCount(0);
+    setRecordingProgress(0);
     setAnalyzing(true);
     setHoldRecording(true);
     holdRecordingRef.current = {
@@ -830,18 +1047,29 @@ export function IndustrialVideoAnalyzer({
       const detectorRuntime = await tryCreateObjectDetector();
       setDetectorStatus(detectorRuntime.label);
       previousFrameRef.current = null;
-      setStatus("recording locally - release to analyze");
+      setStatus("smart recording - edge boxes live");
 
       while (holdRecordingRef.current.active && !holdRecordingRef.current.stopRequested) {
         const elapsedMs = Math.max(0, performance.now() - holdRecordingRef.current.startedAt);
+        const progress = Math.min(1, elapsedMs / SMART_RECORDING_MAX_MS);
+        setRecordingProgress(progress);
         const frame = await captureOneFrame(elapsedMs);
         if (frame) {
           const nextFrames = [...holdRecordingRef.current.frames, frame].slice(-MAX_FRAMES);
           holdRecordingRef.current.frames = nextFrames;
           setLastFrames(nextFrames);
-          setStatus(`recording locally - ${nextFrames.length} selected frame${nextFrames.length === 1 ? "" : "s"}`);
+          const edgeSelection = selectEdgeTriggeredFrames(nextFrames, MAX_CLOUD_FRAMES, { allowFallback: false });
+          const triggerSeen = edgeSelection.summary.objectFrames > 0 || edgeSelection.summary.motionFrames > 0;
+          const triggerLabel = edgeSelection.summary.objectFrames > 0 ? "object trigger" : edgeSelection.summary.motionFrames > 0 ? "motion trigger" : "watching";
+          setStatus(`smart recording - ${triggerLabel} - ${nextFrames.length} edge frame${nextFrames.length === 1 ? "" : "s"}`);
+          if (elapsedMs >= SMART_RECORDING_MIN_MS && triggerSeen && nextFrames.length >= 3) {
+            holdRecordingRef.current.stopRequested = true;
+          }
         }
-        await new Promise((resolve) => window.setTimeout(resolve, 420));
+        if (elapsedMs >= SMART_RECORDING_MAX_MS) {
+          holdRecordingRef.current.stopRequested = true;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, SMART_RECORDING_INTERVAL_MS));
       }
 
       if (!holdRecordingRef.current.frames.length) {
@@ -857,16 +1085,19 @@ export function IndustrialVideoAnalyzer({
       holdRecordingRef.current.stopRequested = false;
       holdRecordingRef.current.pointerId = null;
       setHoldRecording(false);
+      setRecordingProgress(1);
       await submitFramesForAnalysis(frames);
     } catch (recordError) {
       holdRecordingRef.current.active = false;
       holdRecordingRef.current.stopRequested = false;
       holdRecordingRef.current.pointerId = null;
       setHoldRecording(false);
+      setRecordingProgress(0);
       setError(readableError(recordError));
       setStatus("analysis error");
     } finally {
       setAnalyzing(false);
+      setRecordingProgress(0);
     }
   }, [analyzing, captureOneFrame, running, source, startCamera, submitFramesForAnalysis]);
 
@@ -879,7 +1110,7 @@ export function IndustrialVideoAnalyzer({
     }
     holdRecordingRef.current.stopRequested = true;
     holdRecordingRef.current.pointerId = null;
-    setStatus("recording stopped - preparing cloud request");
+    setStatus("recording stopped - preparing cloud enhancement");
   }, []);
 
   const recordOrAnalyze = useCallback(async () => {
@@ -896,9 +1127,16 @@ export function IndustrialVideoAnalyzer({
     holdRecordingRef.current.active = false;
     holdRecordingRef.current.stopRequested = true;
     setHoldRecording(false);
+    setRecordingProgress(0);
     setError(null);
     setAnalysis(null);
     setLastFrames([]);
+    setPreviewDetections([]);
+    latestPreviewDetectionsRef.current = [];
+    setEdgePreviewMetrics(null);
+    setEdgePreviewFrameCount(0);
+    setEdgeDetectionLatencyMs(0);
+    setEdgeLoopFps(0);
     setEdgeGateSummary(null);
     setStatus(running ? `preview only - ${cameraFacing === "environment" ? "back" : "front"} camera - no cloud upload` : "camera off - no recording");
     previousFrameRef.current = null;
@@ -1168,17 +1406,17 @@ export function IndustrialVideoAnalyzer({
   const isRecordingLocal = holdRecording && !isCloudSending && isLiveSource;
   const providerLabel = PROVIDER_COPY[provider].label;
   const sourceCaptureDetail = isLiveSource
-    ? `Live camera: hold Record, sample up to ${MAX_FRAMES} selected frames locally, then send one cloud request on release.`
+    ? `Live camera: tap Record, draw edge boxes immediately, sample up to ${MAX_FRAMES} local frames, then send one edge-selected cloud request.`
     : `Uploaded/demo video: sample up to ${MAX_FRAMES} keyframes across the full clip duration, then send selected JPEGs.`;
   const analyzeLabel = isLiveSource
-    ? "Hold to record"
+    ? "Record live scene"
     : `Ask ${providerLabel} about this clip`;
   const cameraFacingLabel = cameraFacing === "environment" ? "Back camera" : "Front camera";
   const cameraCaptureState = isCloudSending
     ? "Sending sampled frames to cloud"
     : analyzing
       ? isLiveSource
-        ? `Recording while held - release to analyze`
+        ? `Smart recording - edge boxes live`
         : `Sampling full clip locally - not uploaded yet`
       : running
         ? `Preview only - ${cameraFacingLabel} - no recording`
@@ -1191,7 +1429,7 @@ export function IndustrialVideoAnalyzer({
     ? "Cloud request running. Hold this view until the response returns."
     : analyzing
       ? isLiveSource
-        ? `Recording locally. Release the button to send one analysis.`
+        ? `Recording locally. Browser boxes and motion gate decide which frames go to cloud.`
         : `Sampling keyframes across the clip. Full video stays local.`
       : analysis
         ? "Cloud response received. Adjust the prompt or scene, then analyze again."
@@ -1200,7 +1438,7 @@ export function IndustrialVideoAnalyzer({
     ? isCloudSending
       ? `Analyzing with ${providerLabel}...`
       : isLiveSource
-        ? "Recording... release to analyze"
+        ? "Recording live... stop now"
         : "Sampling frames..."
     : analyzeLabel;
   const videoProcessingTitle = isCloudSending
@@ -1218,7 +1456,7 @@ export function IndustrialVideoAnalyzer({
       ? "Selected JPEG frames are being analyzed."
       : analyzing
         ? isLiveSource
-          ? "Release the record button to send one cloud request."
+          ? "Edge boxes update live; cloud enhancement runs automatically."
           : "Keep the scene steady while the browser samples frames."
         : analysis
           ? "Result card has the latest scene output."
@@ -1231,7 +1469,9 @@ export function IndustrialVideoAnalyzer({
   const evidenceFrame = lastFrames.find((frame) => frame.localDetections.length > 0) ?? lastFrames[0] ?? null;
   const evidenceDetections = evidenceFrame?.localDetections.slice(0, 8) ?? [];
   const liveOverlayFrame = lastFrames.length ? lastFrames[lastFrames.length - 1] : null;
-  const liveOverlayDetections = liveOverlayFrame?.localDetections.slice(0, 8) ?? [];
+  const liveOverlayDetections = (source === "camera" && previewDetections.length ? previewDetections : liveOverlayFrame?.localDetections ?? []).slice(0, 8);
+  const hybridEdgeContext = summarizeHybridEdgeContext(lastFrames);
+  const cloudConfirmedLabels = new Set(analysis?.objects.map((object) => object.label.toLowerCase()) ?? []);
   const edgeGateLabel = edgeGateSummary
     ? `${edgeGateSummary.selectedFrames}/${edgeGateSummary.inputFrames} sent`
     : "waiting";
@@ -1240,6 +1480,27 @@ export function IndustrialVideoAnalyzer({
     : forceCloudAnalysis
       ? "Edge gate prefers object/motion frames; force cloud fallback is on."
       : "Edge gate waits for local objects or motion before sending frames.";
+  const edgePreviewObjectTrigger = previewDetections.some((detection) => detection.score >= EDGE_OBJECT_TRIGGER_SCORE);
+  const edgePreviewMotionTrigger = (edgePreviewMetrics?.motionScore ?? 0) >= EDGE_MOTION_TRIGGER_SCORE;
+  const edgePreviewDecision = edgePreviewObjectTrigger
+    ? "object trigger"
+    : edgePreviewMotionTrigger
+      ? "motion trigger"
+      : edgePreviewMetrics
+        ? "watching locally"
+        : "waiting for video";
+  const edgePreviewQuality = edgePreviewMetrics
+    ? edgePreviewMetrics.usable
+      ? "usable frame"
+      : edgePreviewMetrics.rejectionReason ?? "low-quality frame"
+    : "no frame yet";
+  const edgeHudDetail = `${previewDetections.length} box${previewDetections.length === 1 ? "" : "es"} - ${edgeLoopFps || "--"} fps - ${edgeDetectionLatencyMs || "--"}ms - edge frame ${edgePreviewFrameCount}`;
+  const edgeMetadataDetail = edgeGateSummary
+    ? `${hybridEdgeContext.detections} local box${hybridEdgeContext.detections === 1 ? "" : "es"} sent as metadata with ${edgeGateSummary.selectedFrames} image frame${edgeGateSummary.selectedFrames === 1 ? "" : "s"}`
+    : hybridEdgeContext.frames
+      ? `${hybridEdgeContext.detections} local box${hybridEdgeContext.detections === 1 ? "" : "es"} ready for cloud context`
+      : "Edge metadata will appear while recording";
+  const recordingProgressPercent = Math.round(recordingProgress * 100);
 
   return (
     <main className="industrial-shell">
@@ -1272,20 +1533,23 @@ export function IndustrialVideoAnalyzer({
               <div className="live-detection-overlay" aria-label="Browser edge detection overlay">
                 {liveOverlayDetections.map((detection, index) => (
                   <div
-                    className="live-detection-box"
+                    className={`live-detection-box ${cloudConfirmedLabels.has(detection.label.toLowerCase()) ? "cloud-confirmed" : ""}`}
                     key={`${detection.label}-${index}-${detection.x}-${detection.y}`}
-                    style={{
-                      left: `${detection.x * 100}%`,
-                      top: `${detection.y * 100}%`,
-                      width: `${detection.w * 100}%`,
-                      height: `${detection.h * 100}%`,
-                    }}
+                    style={overlayStyleForDetection(detection, videoViewport)}
                   >
-                    <span>{detection.label} {Math.round(detection.score * 100)}%</span>
+                    <span>{detection.label} {Math.round(detection.score * 100)}%{cloudConfirmedLabels.has(detection.label.toLowerCase()) ? " cloud" : ""}</span>
                   </div>
                 ))}
               </div>
             ) : null}
+            <div className={`edge-live-hud ${edgePreviewObjectTrigger || edgePreviewMotionTrigger ? "triggered" : ""}`}>
+              <div>
+                <span>Live edge processing</span>
+                <strong>{edgePreviewDecision}</strong>
+              </div>
+              <small>{edgeHudDetail}</small>
+              <em>{edgePreviewQuality}. Green boxes are browser edge; blue boxes are cloud-confirmed.</em>
+            </div>
             <div className={`video-processing-badge ${analyzing ? "active" : analysis ? "ready" : ""}`}>
               <strong>{videoProcessingTitle}</strong>
               <span>{videoProcessingDetail}</span>
@@ -1329,6 +1593,35 @@ export function IndustrialVideoAnalyzer({
               <small>{isLiveSource ? "Live camera burst" : "Full clip keyframe scan"}</small>
             </div>
 
+            <div className="primary-record-strip">
+              <button
+                aria-pressed={holdRecording}
+                className={`analyze-button first-fold-analyze ${isRecordingLocal ? "recording" : ""}`}
+                disabled={source === "camera" ? isCloudSending : analyzing}
+                onClick={(event) => {
+                  if (source === "camera") {
+                    event.preventDefault();
+                    if (holdRecording) {
+                      finishHoldRecording();
+                    } else {
+                      void beginHoldRecording();
+                    }
+                    return;
+                  }
+                  void recordOrAnalyze();
+                }}
+                type="button"
+              >
+                <span className="record-dot" /> {analyzeButtonText}
+              </button>
+              <small>{isLiveSource ? `Tap once. Edge boxes update live for up to ${Math.round(SMART_RECORDING_MAX_MS / 1000)}s, then selected frames and object metadata go to cloud.` : "Click once to sample this clip and send selected frames."}</small>
+              {isLiveSource ? (
+                <div className="smart-record-progress" aria-label={`Recording progress ${recordingProgressPercent}%`}>
+                  <span style={{ width: `${recordingProgressPercent}%` }} />
+                </div>
+              ) : null}
+            </div>
+
             <div className={`scene-result-card ${analysis ? "ready" : analyzing ? "loading" : ""}`}>
               <div className="scene-result-topline">
                 <span>{resultStatus}</span>
@@ -1361,7 +1654,11 @@ export function IndustrialVideoAnalyzer({
                   <strong>{edgeGateLabel}</strong>
                 </div>
                 <div>
-                  <span>Frames</span>
+                  <span>Edge metadata</span>
+                  <strong>{hybridEdgeContext.detections || "--"} boxes</strong>
+                </div>
+                <div>
+                  <span>Cloud frames</span>
                   <strong>{analysis?.edgeAssessment.framesAnalyzed ?? (lastFrames.length || "--")}</strong>
                 </div>
                 <div>
@@ -1381,7 +1678,7 @@ export function IndustrialVideoAnalyzer({
                   </span>
                 ))}
                 {!objectChips.length ? <span>No objects captured yet</span> : null}
-                <small>{detectorStatus}. {edgeGateDetail}</small>
+                <small>{detectorStatus}. {edgeMetadataDetail}. {edgeGateDetail}</small>
               </div>
               {evidenceFrame ? (
                 <div className="evidence-frame-panel" aria-label="Evidence frame with detections">
@@ -1393,16 +1690,11 @@ export function IndustrialVideoAnalyzer({
                     <Image alt="Sampled evidence frame" fill sizes="(max-width: 720px) 100vw, 420px" src={evidenceFrame.imageDataUrl} unoptimized />
                     {evidenceDetections.map((detection, index) => (
                       <div
-                        className="evidence-box"
+                        className={`evidence-box ${cloudConfirmedLabels.has(detection.label.toLowerCase()) ? "cloud-confirmed" : ""}`}
                         key={`${detection.label}-${index}-${detection.x}`}
-                        style={{
-                          left: `${detection.x * 100}%`,
-                          top: `${detection.y * 100}%`,
-                          width: `${detection.w * 100}%`,
-                          height: `${detection.h * 100}%`,
-                        }}
+                        style={overlayStyleForDetection(detection, { x: 0, y: 0, w: 100, h: 100 })}
                       >
-                        <span>{detection.label} {Math.round(detection.score * 100)}%</span>
+                        <span>{detection.label} {Math.round(detection.score * 100)}%{cloudConfirmedLabels.has(detection.label.toLowerCase()) ? " cloud" : ""}</span>
                       </div>
                     ))}
                   </div>
@@ -1454,44 +1746,6 @@ export function IndustrialVideoAnalyzer({
               <span>Plain-language analytics question</span>
               <textarea onChange={(event) => setObjective(event.target.value)} placeholder={DEFAULT_OBJECTIVE} value={objective} />
             </label>
-
-            <button
-              aria-pressed={holdRecording}
-              className={`analyze-button first-fold-analyze ${isRecordingLocal ? "recording" : ""}`}
-              disabled={source === "camera" ? isCloudSending : analyzing}
-              onClick={(event) => {
-                if (source === "camera") {
-                  event.preventDefault();
-                  return;
-                }
-                void recordOrAnalyze();
-              }}
-              onPointerCancel={(event) => {
-                if (source === "camera") {
-                  finishHoldRecording(event);
-                }
-              }}
-              onPointerDown={(event) => {
-                if (source === "camera") {
-                  event.preventDefault();
-                  void beginHoldRecording(event);
-                }
-              }}
-              onPointerLeave={(event) => {
-                if (source === "camera" && holdRecordingRef.current.pointerId === event.pointerId) {
-                  finishHoldRecording(event);
-                }
-              }}
-              onPointerUp={(event) => {
-                if (source === "camera") {
-                  event.preventDefault();
-                  finishHoldRecording(event);
-                }
-              }}
-              type="button"
-            >
-              <span className="record-dot" /> {analyzeButtonText}
-            </button>
 
             <div className="quick-preset-row" aria-label="Example analytics">
               <button className={objective === DEFAULT_OBJECTIVE ? "active" : ""} onClick={() => {
