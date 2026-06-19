@@ -1806,7 +1806,7 @@ export function IndustrialVideoAnalyzer({
           ? "Edge boxes update live; cloud waits for your explicit click."
           : "Keep the scene steady while the browser samples frames."
         : analysis
-          ? "Result card has the latest scene output."
+          ? "Main result frame has the latest scene output."
           : "Press the red button to begin.";
   const quickPresets = OBJECTIVE_PRESETS.slice(0, 6);
   const localObjectChips = summarizeEdgeDetections(lastFrames);
@@ -1855,13 +1855,6 @@ export function IndustrialVideoAnalyzer({
     : hybridEdgeContext.frames
       ? `${hybridEdgeContext.detections} local box${hybridEdgeContext.detections === 1 ? "" : "es"} ready for cloud context`
       : "Edge metadata will appear while recording";
-  const hybridPipelineStatus = analysis
-    ? "Cloud enhanced the selected edge frames"
-    : hasLocalEdgeFrames
-      ? "Edge buffer is live; cloud send is ready"
-      : running
-        ? "Browser edge is proposing live regions"
-        : "Start camera to begin edge proposals";
   const recordingProgressPercent = Math.round(recordingProgress * 100);
   const latestGeminiCommentary = liveGeminiInsight ?? liveTranscript.find((item) => item.startsWith("Gemini:"));
   const liveCommentary = latestGeminiCommentary ?? (liveRunning ? "Gemini is reading selected live snapshots." : null);
@@ -2065,6 +2058,14 @@ export function IndustrialVideoAnalyzer({
                 </div>
                 <h2>{displayHeadline}</h2>
                 <p>{displayCommentary}</p>
+                <AnimatePresence>
+                {error ? (
+                  <motion.div className="primary-error-banner" role="alert" initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={springTransition}>
+                    <AlertTriangle size={16} />
+                    <span>{error}</span>
+                  </motion.div>
+                ) : null}
+                </AnimatePresence>
                 {(primaryLiveFeedItems.length ? primaryLiveFeedItems : ["Press Start Gemini Live. The camera opens here, edge boxes update locally, and Gemini comments on selected live snapshots."]).map((item) => (
                   <p className="command-live-line" key={item}>{item}</p>
                 ))}
@@ -2075,8 +2076,24 @@ export function IndustrialVideoAnalyzer({
                     <p>{topRecommendedAction.reason}</p>
                   </div>
                 ) : null}
+                <div className="command-detected-row" aria-label="Detected objects">
+                  <div>
+                    <span>Detected objects</span>
+                    <strong>{objectChips.length ? `${objectChips.length} type${objectChips.length === 1 ? "" : "s"}` : "Waiting for edge"}</strong>
+                  </div>
+                  <div className="command-object-chips">
+                    {objectChips.map((object) => (
+                      <span key={`${object.label}-${object.count}`}>
+                        {object.label} {object.count > 1 ? `x${object.count}` : ""} {object.score ? `${Math.round(object.score * 100)}%` : ""}
+                      </span>
+                    ))}
+                    {!objectChips.length ? <span>No objects captured yet</span> : null}
+                  </div>
+                </div>
                 <div className="gemini-live-usage command-usage-grid" aria-label="Live Gemini usage">
                   <span><strong>{displayedCost}</strong> total cost</span>
+                  <span><strong>{hybridEdgeContext.detections || "--"}</strong> local boxes</span>
+                  <span><strong>{edgeGateLabel}</strong> edge gate</span>
                   <span><strong>{liveUsage.requests || (analysis ? 1 : 0)}</strong> cloud call{liveUsage.requests === 1 ? "" : "s"}</span>
                   <span><strong>{displayedCloudFrames}</strong> cloud frame{displayedCloudFrames === 1 ? "" : "s"}</span>
                   <span><strong>{displayedLatency}</strong> latency</span>
@@ -2089,22 +2106,6 @@ export function IndustrialVideoAnalyzer({
                   </div>
                 ) : null}
               </div>
-            </motion.div>
-
-            <motion.div className="hybrid-pipeline-strip" aria-label="Hybrid edge and cloud pipeline" layout transition={springTransition}>
-              <motion.div className={running ? "active" : ""} layout transition={springTransition}>
-                <span>Local edge</span>
-                <strong>{edgeModelLabel}</strong>
-              </motion.div>
-              <motion.div className={hasLocalEdgeFrames ? "active" : ""} layout transition={springTransition}>
-                <span>Frame buffer</span>
-                <strong>{lastFrames.length || "--"} current frame{lastFrames.length === 1 ? "" : "s"}</strong>
-              </motion.div>
-              <motion.div className={analysis ? "active" : ""} layout transition={springTransition}>
-                <span>Cloud answer</span>
-                <strong>{analysis ? `${Math.round(analysis.confidence)}%` : "manual send"}</strong>
-              </motion.div>
-              <small>{hybridPipelineStatus}. Edge filters the video; cloud reasons over selected evidence.</small>
             </motion.div>
 
             <motion.div className={`scene-result-card secondary-result-card ${liveRunning ? "live-secondary" : ""} ${analysis ? "ready" : analyzing ? "loading" : ""}`} layout transition={springTransition}>

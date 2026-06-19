@@ -1495,10 +1495,57 @@ h3 {
   line-height: 1.2;
 }
 
-.command-usage-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+.command-detected-row {
+  background: #ffffff;
+  border: 1px solid rgba(16, 32, 25, 0.08);
+  border-radius: 12px;
+  display: grid;
+  gap: 7px;
+  padding: 9px;
 }
 
+.command-detected-row > div:first-child {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.command-detected-row span {
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.command-detected-row strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.command-object-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.command-object-chips span {
+  background: var(--green-soft);
+  border: 1px solid rgba(17, 131, 75, 0.18);
+  border-radius: 999px;
+  color: var(--green);
+  font-size: 11px;
+  letter-spacing: 0;
+  padding: 5px 8px;
+  text-transform: none;
+}
+
+.command-usage-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.secondary-result-card,
 .secondary-result-card.live-secondary {
   display: none;
 }
