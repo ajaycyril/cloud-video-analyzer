@@ -113,10 +113,41 @@ function shouldRetryOpenAIError(error: unknown): boolean {
   );
 }
 
+function shouldRetryGeminiError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return true;
+  }
+  return !(
+    error.message.includes("API_KEY") ||
+    error.message.includes("PERMISSION_DENIED") ||
+    error.message.includes("INVALID_ARGUMENT") ||
+    error.message.includes("MODEL_RESPONSE_SCHEMA_MISMATCH") ||
+    error.message.includes("MODEL_RESPONSE_INVALID_JSON")
+  );
+}
+
 export async function analyzeVideoWithGemini(request: VideoAnalysisRequest): Promise<VideoAnalysisResponse> {
   const ai = getGeminiClient();
   const model = configuredModel("gemini");
   const startedAt = Date.now();
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await requestGeminiAnalysis(ai, model, request, startedAt);
+    } catch (error) {
+      lastError = error;
+      if (attempt === 1 || !shouldRetryGeminiError(error)) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("GEMINI_REQUEST_FAILED");
+}
+
+async function requestGeminiAnalysis(ai: GoogleGenAI, model: string, request: VideoAnalysisRequest, startedAt: number): Promise<VideoAnalysisResponse> {
   const response = await ai.models.generateContent({
     model,
     contents: [

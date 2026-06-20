@@ -13,6 +13,7 @@ export async function listVideoInputDevices(): Promise<MediaDeviceInfo[]> {
 export function buildVideoConstraints(mode: Mode, deviceId: string | null, facingMode: CameraFacing = mode === "webcam_coach" ? "user" : "environment"): MediaStreamConstraints {
   const wantsWebcam = mode === "webcam_coach";
   const wantsRearCamera = facingMode === "environment";
+  const fullFieldOfViewHint = { resizeMode: { ideal: "none" } } as unknown as Partial<MediaTrackConstraints>;
   const videoSizing =
     wantsWebcam && !wantsRearCamera
       ? {
@@ -29,6 +30,7 @@ export function buildVideoConstraints(mode: Mode, deviceId: string | null, facin
       video: {
         deviceId: { exact: deviceId },
         ...videoSizing,
+        ...fullFieldOfViewHint,
       },
       audio: false,
     };
@@ -38,6 +40,7 @@ export function buildVideoConstraints(mode: Mode, deviceId: string | null, facin
     video: {
       facingMode: { ideal: facingMode },
       ...videoSizing,
+      ...fullFieldOfViewHint,
     },
     audio: false,
   };

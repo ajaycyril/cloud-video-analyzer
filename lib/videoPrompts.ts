@@ -53,7 +53,7 @@ export function buildVideoAnalysisPrompt(request: VideoAnalysisRequest): string 
     request.sampling.edgeGate
       ? `Two-step edge gate: ${request.sampling.edgeGate.strategy}. Browser captured ${request.sampling.edgeGate.inputFrames} frames, selected ${request.sampling.edgeGate.selectedFrames}, skipped ${request.sampling.edgeGate.skippedFrames}, object frames ${request.sampling.edgeGate.objectFrames}, motion frames ${request.sampling.edgeGate.motionFrames}.`
       : "Two-step edge gate: not reported by this client.",
-    `Hybrid edge context sent to cloud: ${hybridContext.detections} browser object box${hybridContext.detections === 1 ? "" : "es"} across ${hybridContext.objectFrames}/${hybridContext.frames} object-triggered frame${hybridContext.objectFrames === 1 ? "" : "s"}, ${hybridContext.motionFrames} motion-triggered frame${hybridContext.motionFrames === 1 ? "" : "s"}, ${hybridContext.usableFrames} usable frame${hybridContext.usableFrames === 1 ? "" : "s"}. Use these local detections as cost-saving hints, then verify against the attached images before making claims.`,
+    `Hybrid edge-to-cloud context: browser edge models detected ${hybridContext.detections} object class box${hybridContext.detections === 1 ? "" : "es"} across ${hybridContext.objectFrames}/${hybridContext.frames} object-triggered frame${hybridContext.objectFrames === 1 ? "" : "s"}, plus ${hybridContext.motionFrames} motion-triggered frame${hybridContext.motionFrames === 1 ? "" : "s"} and ${hybridContext.usableFrames} usable frame${hybridContext.usableFrames === 1 ? "" : "s"}. Treat edge classes as cheap trigger hints, then use the attached images to reason about behavior, traffic buildup, safety risk, or operational action.`,
     hybridContext.objects.length
       ? `Edge object summary: ${hybridContext.objects
           .slice(0, 10)
@@ -62,7 +62,7 @@ export function buildVideoAnalysisPrompt(request: VideoAnalysisRequest): string 
       : "Edge object summary: no browser detections above threshold.",
     "Edge metrics per frame:",
     edgeSummary,
-    hybridContext.promptLines.length ? "Local browser detections sent as metadata:\n" + hybridContext.promptLines.join("\n") : "Local browser detections sent as metadata: none above threshold.",
+    hybridContext.promptLines.length ? "Local edge object classes sent as metadata:\n" + hybridContext.promptLines.join("\n") : "Local edge object classes sent as metadata: none above threshold.",
     "Return a practical answer suitable for a live demo. The headline and commentary should read like a direct answer to the user's plain-language question.",
     alertInstruction,
     "Keep commentary punchy enough for live narration.",

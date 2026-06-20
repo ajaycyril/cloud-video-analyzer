@@ -1,4 +1,5 @@
 import type { SampledFrame, VideoAnalysisResponse } from "./videoSchema";
+import { isRealObjectDetection } from "./detectionLabels";
 
 export type EdgeDetectionSummary = {
   label: string;
@@ -25,7 +26,7 @@ function average(values: number[]): number {
 
 export function summarizeEdgeDetections(frames: SampledFrame[]): EdgeDetectionSummary[] {
   const byLabel = new Map<string, EdgeDetectionSummary>();
-  for (const detection of frames.flatMap((frame) => frame.localDetections)) {
+  for (const detection of frames.flatMap((frame) => frame.localDetections).filter(isRealObjectDetection)) {
     const key = detection.label.toLowerCase();
     const current = byLabel.get(key);
     if (current) {

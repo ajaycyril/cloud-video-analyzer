@@ -1,4 +1,5 @@
 import type { SampledFrame } from "./videoSchema";
+import { isRealObjectDetection } from "./detectionLabels";
 
 const DEFAULT_MAX_CLOUD_FRAMES = 3;
 const MOTION_TRIGGER_SCORE = 8;
@@ -27,7 +28,7 @@ export type EdgeGateSummary = {
 };
 
 function frameScore(frame: SampledFrame): number {
-  const bestDetection = frame.localDetections.reduce((best, detection) => Math.max(best, detection.score), 0);
+  const bestDetection = frame.localDetections.filter(isRealObjectDetection).reduce((best, detection) => Math.max(best, detection.score), 0);
   const detectionWeight = bestDetection * 130;
   const motionWeight = frame.edgeMetrics.motionScore * 2.1;
   const qualityWeight = frame.edgeMetrics.usable ? 18 : -20;
@@ -37,9 +38,9 @@ function frameScore(frame: SampledFrame): number {
 
 function frameReasons(frame: SampledFrame): string[] {
   const reasons: string[] = [];
-  const confidentDetections = frame.localDetections.filter((detection) => detection.score >= MIN_DETECTION_SCORE);
+  const confidentDetections = frame.localDetections.filter((detection) => isRealObjectDetection(detection) && detection.score >= MIN_DETECTION_SCORE);
   if (confidentDetections.length) {
-    reasons.push(`${confidentDetections.length} local object${confidentDetections.length === 1 ? "" : "s"}`);
+    reasons.push(`${confidentDetections.length} edge object class${confidentDetections.length === 1 ? "" : "es"}`);
   }
   if (frame.edgeMetrics.motionScore >= MOTION_TRIGGER_SCORE) {
     reasons.push(`motion ${Math.round(frame.edgeMetrics.motionScore)}`);
@@ -53,7 +54,7 @@ function frameReasons(frame: SampledFrame): string[] {
 export function buildEdgeGateSummary(frames: SampledFrame[], maxCloudFrames = DEFAULT_MAX_CLOUD_FRAMES, options: EdgeGateOptions = {}): EdgeGateSummary {
   const decisions = frames.map((frame, frameIndex) => {
     const reasons = frameReasons(frame);
-    const sendToCloud = frame.edgeMetrics.usable && reasons.some((reason) => reason.startsWith("motion") || reason.includes("local object"));
+    const sendToCloud = frame.edgeMetrics.usable && reasons.some((reason) => reason.startsWith("motion") || reason.includes("edge object class"));
     return {
       frameIndex,
       sendToCloud,
@@ -78,7 +79,7 @@ export function buildEdgeGateSummary(frames: SampledFrame[], maxCloudFrames = DE
     reasons: selectedIndexes.has(decision.frameIndex) && fallbackUsed ? [...decision.reasons, "forced cloud fallback"] : decision.reasons,
   }));
 
-  const objectFrames = frames.filter((frame) => frame.localDetections.some((detection) => detection.score >= MIN_DETECTION_SCORE)).length;
+  const objectFrames = frames.filter((frame) => frame.localDetections.some((detection) => isRealObjectDetection(detection) && detection.score >= MIN_DETECTION_SCORE)).length;
   const motionFrames = frames.filter((frame) => frame.edgeMetrics.motionScore >= MOTION_TRIGGER_SCORE).length;
   const selectedFrames = finalDecisions.filter((decision) => decision.sendToCloud).length;
 
@@ -90,13 +91,13 @@ export function buildEdgeGateSummary(frames: SampledFrame[], maxCloudFrames = DE
     motionFrames,
     staticFrames: frames.length - new Set([
       ...frames
-        .map((frame, index) => (frame.localDetections.some((detection) => detection.score >= MIN_DETECTION_SCORE) ? index : -1))
+        .map((frame, index) => (frame.localDetections.some((detection) => isRealObjectDetection(detection) && detection.score >= MIN_DETECTION_SCORE) ? index : -1))
         .filter((index) => index >= 0),
       ...frames.map((frame, index) => (frame.edgeMetrics.motionScore >= MOTION_TRIGGER_SCORE ? index : -1)).filter((index) => index >= 0),
     ]).size,
     strategy: fallbackUsed
       ? `browser edge gate: no trigger, forced cloud fallback selected best frames`
-      : `browser edge gate: send frames only when local objects >= ${Math.round(MIN_DETECTION_SCORE * 100)}% or motion >= ${MOTION_TRIGGER_SCORE}`,
+      : `browser edge gate: send frames only when real edge classes >= ${Math.round(MIN_DETECTION_SCORE * 100)}% or motion >= ${MOTION_TRIGGER_SCORE}`,
     decisions: finalDecisions,
   };
 }

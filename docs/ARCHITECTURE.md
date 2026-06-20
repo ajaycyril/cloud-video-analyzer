@@ -1,6 +1,8 @@
 # Architecture
 
-Cloud Video Analyzer is organized around a provider-neutral video analytics contract.
+Cloud Video Analyzer is organized around a provider-neutral edge-to-cloud video analytics contract.
+
+The product pattern is the same one used in scalable physical AI systems: run cheap perception at the edge first, then spend cloud reasoning only when the edge sees something worth explaining. For example, a city camera can detect people, vehicles, or motion locally, then ask a cloud model whether traffic is building up, whether a person entered a restricted area, or what action an operator should take.
 
 ## Flow
 
@@ -8,7 +10,7 @@ Cloud Video Analyzer is organized around a provider-neutral video analytics cont
 camera/file/sample video
   -> browser keyframe sampler
   -> edge quality + motion metrics
-  -> local object detections
+  -> local person / vehicle / object detections
   -> object/motion edge gate
   -> optional Roboflow specialist detections on selected frames
   -> plain-language objective + zones
@@ -25,6 +27,8 @@ The browser reduces cloud cost and latency before any API call:
 - Compresses frames as JPEG.
 - Computes brightness, contrast, sharpness, edge density, motion, stability, and visual complexity.
 - Runs local object detection with a bundled EfficientDet Lite model when browser support is available.
+- Uses Transformers.js WebGPU object detection on capable desktop Chrome devices for a heavier local perception layer.
+- Separates true object classes from heuristic motion/attention proposals, so generic edge proposals can trigger cloud review without being displayed as fake object labels.
 - Applies an object/motion gate before any cloud reasoning request; static frames without local objects or motion are skipped.
 - Optionally enriches only edge-selected frames through Roboflow hosted object detection when `ROBOFLOW_API_KEY` or `ROBOFLOW_INFERENCE_API_KEY` plus `ROBOFLOW_MODEL` are configured.
 - Sends drawn zones as normalized coordinates.

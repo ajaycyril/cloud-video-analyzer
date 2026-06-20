@@ -4,6 +4,7 @@ import { AlertTriangle, Camera, Crosshair, FileVideo, Pause, Play, Radar, Rotate
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent } from "react";
 import { buildVideoConstraints, listVideoInputDevices, stopStream, type CameraFacing } from "@/lib/camera";
+import { isProposalDetectionLabel, isRealObjectDetection } from "@/lib/detectionLabels";
 import { selectEdgeTriggeredFrames, type EdgeGateSummary } from "@/lib/edgeFrameGate";
 import { canvasToJpegDataUrl, captureVideoFrame, computeEdgeMetrics, type EdgeMetricResult } from "@/lib/edgeMetrics";
 import { summarizeHybridEdgeContext } from "@/lib/hybridEdgeContext";
@@ -32,6 +33,9 @@ type VideoViewport = {
   w: number;
   h: number;
 };
+type VideoAspectStyle = CSSProperties & {
+  "--video-aspect-ratio"?: string;
+};
 type ZoneInteraction =
   | { kind: "draw"; start: { x: number; y: number } }
   | { kind: "resize"; corner: ZoneCorner; zone: Zone };
@@ -53,8 +57,7 @@ type MotionSnapshot = {
 const MAX_FRAMES = 4;
 const MAX_CLOUD_FRAMES = 3;
 const CAMERA_CAPTURE_WINDOW_MS = 1600;
-const PREVIEW_DETECTION_INTERVAL_MS = 180;
-const TRANSFORMERS_LIVE_INTERVAL_MS = 1400;
+const PREVIEW_DETECTION_INTERVAL_MS = 120;
 const SMART_RECORDING_MIN_MS = 1100;
 const SMART_RECORDING_MAX_MS = 2200;
 const SMART_RECORDING_INTERVAL_MS = 320;
@@ -91,6 +94,16 @@ const OBJECTIVE_PRESETS: Array<{ label: string; mode: VideoMode; objective: stri
     label: "Queue/crowd",
     mode: "operations",
     objective: "Estimate crowding or queue buildup, identify where movement is blocked, and recommend whether a human supervisor or robot should intervene.",
+  },
+  {
+    label: "Traffic buildup",
+    mode: "operations",
+    objective: "Use edge-detected vehicles, people, or motion as triggers, then determine whether traffic or crowding is building up and what operational action should follow.",
+  },
+  {
+    label: "Surveillance triage",
+    mode: "safety",
+    objective: "Use edge person/vehicle/object detections to choose important frames, then explain what the subject is doing, whether behavior looks risky, and what should be escalated.",
   },
   {
     label: "Asset watch",
@@ -205,7 +218,7 @@ function isLocalDetection(value: unknown): value is LocalDetection {
 }
 
 function isProposalDetection(detection: LocalDetection): boolean {
-  return detection.label.includes("/") || detection.label.includes("region") || detection.label.includes("attention") || detection.label.includes("candidate");
+  return isProposalDetectionLabel(detection.label);
 }
 
 function mergeDetections(current: LocalDetection[], additions: LocalDetection[]): LocalDetection[] {
@@ -224,9 +237,9 @@ function selectDisplayDetections(detections: LocalDetection[], limit = 2): Local
   if (motionProposals.length) {
     return motionProposals.slice(0, 1);
   }
-  const screenProposals = proposals.filter((detection) => detection.label.includes("screen") || detection.label.includes("dark panel"));
-  if (screenProposals.length) {
-    return screenProposals.slice(0, 1);
+  const visualProposals = proposals.filter((detection) => detection.label.includes("visual") || detection.label.includes("attention"));
+  if (visualProposals.length) {
+    return visualProposals.slice(0, 1);
   }
   return proposals.slice(0, 1);
 }
@@ -338,21 +351,21 @@ function proposalOverlap(a: LocalDetection, b: LocalDetection): number {
 }
 
 function mergeProposalDetections(detections: LocalDetection[]): LocalDetection[] {
-  return detections
-    .sort((left, right) => {
-      const leftRealBoost = isProposalDetection(left) ? 0 : 0.22;
-      const rightRealBoost = isProposalDetection(right) ? 0 : 0.22;
-      const leftScreenBoost = left.label.includes("screen") ? 0.12 : 0;
-      const rightScreenBoost = right.label.includes("screen") ? 0.12 : 0;
-      return right.score + rightRealBoost + rightScreenBoost - (left.score + leftRealBoost + leftScreenBoost);
-    })
+  const realDetections = detections.filter((detection) => !isProposalDetection(detection)).sort((left, right) => right.score - left.score);
+  const proposals = detections.filter(isProposalDetection).sort((left, right) => right.score - left.score);
+  const ordered = realDetections.length ? [...realDetections, ...proposals] : proposals;
+  return ordered
     .reduce<LocalDetection[]>((merged, detection) => {
       if (merged.some((existing) => proposalOverlap(existing, detection) > 0.74)) {
         return merged;
       }
       return [...merged, detection];
     }, [])
-    .slice(0, 2);
+    .slice(0, realDetections.length ? 4 : 1);
+}
+
+function persistentRealDetections(detections: LocalDetection[]): LocalDetection[] {
+  return detections.filter(isRealObjectDetection).slice(0, 4);
 }
 
 function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapshot | null): {
@@ -408,12 +421,12 @@ function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapsho
     }
   }
 
-  const darkPanelDetections = componentDetections(darkPanelCells, "screen / dark panel", 0.62, 3).filter(
+  const darkPanelDetections = componentDetections(darkPanelCells, "visual proposal", 0.42, 2).filter(
     (detection) => detection.w >= 0.18 && detection.h >= 0.12,
   );
   const visualDetections = componentDetections(
     visualCells.map((cell) => ({ x: cell.x, y: cell.y, weight: Math.min(0.9, cell.range / 110) })),
-    "edge attention",
+    "edge attention proposal",
     0.52,
     3,
   );
@@ -441,7 +454,7 @@ function buildMotionCandidateBoxes(imageData: ImageData, previous: MotionSnapsho
 
   const motionDetections = componentDetections(
     changedCells.map((cell) => ({ x: cell.x, y: cell.y, weight: Math.min(0.94, cell.diff / 90) })),
-    "motion region",
+    "motion proposal",
     0.58,
     2,
   );
@@ -528,8 +541,8 @@ export function IndustrialVideoAnalyzer({
   const previewDetectionBusyRef = useRef(false);
   const lastPreviewDetectionAtRef = useRef(0);
   const latestPreviewDetectionsRef = useRef<LocalDetection[]>([]);
+  const latestRealDetectionsRef = useRef<LocalDetection[]>([]);
   const lastRollingFrameAtRef = useRef(0);
-  const lastTransformersDetectionAtRef = useRef(0);
   const motionSnapshotRef = useRef<MotionSnapshot | null>(null);
   const previousFrameRef = useRef<EdgeMetricResult["snapshot"] | null>(null);
   const zoneInteractionRef = useRef<ZoneInteraction | null>(null);
@@ -564,6 +577,7 @@ export function IndustrialVideoAnalyzer({
   const [lastFrames, setLastFrames] = useState<SampledFrame[]>([]);
   const [analysesUsed, setAnalysesUsed] = useState(initialAnalysesUsed);
   const [videoOrientation, setVideoOrientation] = useState<VideoOrientation>("landscape-video");
+  const [videoAspectRatio, setVideoAspectRatio] = useState("16 / 9");
   const [liveStatus, setLiveStatus] = useState("Live edge camera idle");
   const [liveRunning, setLiveRunning] = useState(false);
   const [liveEvents, setLiveEvents] = useState<string[]>([]);
@@ -664,6 +678,7 @@ export function IndustrialVideoAnalyzer({
       return;
     }
     setVideoOrientation(video.videoHeight > video.videoWidth ? "portrait-video" : "landscape-video");
+    setVideoAspectRatio(`${video.videoWidth} / ${video.videoHeight}`);
     updateVideoViewport();
   }, [updateVideoViewport]);
 
@@ -715,6 +730,9 @@ export function IndustrialVideoAnalyzer({
       await refreshDevices();
       previousFrameRef.current = null;
       motionSnapshotRef.current = null;
+      latestPreviewDetectionsRef.current = [];
+      latestRealDetectionsRef.current = [];
+      setPreviewDetections([]);
       setEdgePreviewMetrics(null);
       setEdgePreviewFrameCount(0);
       setEdgeDetectionLatencyMs(0);
@@ -746,6 +764,7 @@ export function IndustrialVideoAnalyzer({
     setRunning(false);
     setPreviewDetections([]);
     latestPreviewDetectionsRef.current = [];
+    latestRealDetectionsRef.current = [];
     motionSnapshotRef.current = null;
     setEdgePreviewMetrics(null);
     setEdgePreviewFrameCount(0);
@@ -768,6 +787,7 @@ export function IndustrialVideoAnalyzer({
 
     if (source !== "camera" || !running) {
       latestPreviewDetectionsRef.current = [];
+      latestRealDetectionsRef.current = [];
       motionSnapshotRef.current = null;
       lastRollingFrameAtRef.current = 0;
       return;
@@ -776,13 +796,9 @@ export function IndustrialVideoAnalyzer({
     let cancelled = false;
     lastPreviewDetectionAtRef.current = 0;
     lastRollingFrameAtRef.current = 0;
-    lastTransformersDetectionAtRef.current = 0;
 
   const runPreviewDetection = async (now: number) => {
       if (previewDetectionBusyRef.current) {
-        return;
-      }
-      if (holdRecordingRef.current.active) {
         return;
       }
       const video = videoRef.current;
@@ -807,11 +823,14 @@ export function IndustrialVideoAnalyzer({
             frameDataUrl = canvasToJpegDataUrl(canvas, JPEG_QUALITY);
             motionDetections = motionResult.detections;
             if (!cancelled) {
+              const immediateDetections = motionDetections.length
+                ? mergeProposalDetections(motionDetections)
+                : persistentRealDetections(latestPreviewDetectionsRef.current);
               setEdgePreviewMetrics(result.metrics);
               setEdgePreviewFrameCount((count) => count + 1);
-              if (motionDetections.length) {
-                setPreviewDetections(motionDetections);
-                latestPreviewDetectionsRef.current = motionDetections;
+              if (immediateDetections.length) {
+                setPreviewDetections(immediateDetections);
+                latestPreviewDetectionsRef.current = immediateDetections;
                 updateVideoViewport();
               } else if (!getObjectDetectorRuntime().ready) {
                 setPreviewDetections([]);
@@ -829,52 +848,45 @@ export function IndustrialVideoAnalyzer({
           });
           if (!cancelled) {
             setDetectorStatus(motionDetections.length ? "Instant motion edge active; object model warming" : runtime.label);
-            setEdgeDetectionLatencyMs(Math.round(performance.now() - detectionStartedAt));
-            if (edgeMetricsForFrame && frameDataUrl && now - lastRollingFrameAtRef.current >= 650) {
-              lastRollingFrameAtRef.current = now;
-              const imageDataUrl = frameDataUrl;
-              const edgeMetrics = edgeMetricsForFrame;
-              setLastFrames((frames) =>
-                [
-                  ...frames,
-                  {
-                    imageDataUrl,
-                    timestampMs: now,
-                    edgeMetrics,
-                    localDetections: motionDetections,
-                  },
-                ].slice(-MAX_FRAMES),
-              );
-            }
+              setEdgeDetectionLatencyMs(Math.round(performance.now() - detectionStartedAt));
+              if (edgeMetricsForFrame && frameDataUrl && now - lastRollingFrameAtRef.current >= 650) {
+                lastRollingFrameAtRef.current = now;
+                const imageDataUrl = frameDataUrl;
+                const edgeMetrics = edgeMetricsForFrame;
+                const frameDetections = mergeProposalDetections([
+                  ...latestRealDetectionsRef.current,
+                  ...motionDetections,
+                ]);
+                setLastFrames((frames) =>
+                  [
+                    ...frames,
+                    {
+                      imageDataUrl,
+                      timestampMs: now,
+                      edgeMetrics,
+                      localDetections: frameDetections,
+                    },
+                  ].slice(-MAX_FRAMES),
+                );
+              }
           }
           return;
         }
-        const shouldRunTransformers = source !== "camera" && Boolean(frameDataUrl) && now - lastTransformersDetectionAtRef.current >= TRANSFORMERS_LIVE_INTERVAL_MS;
-        if (shouldRunTransformers) {
-          lastTransformersDetectionAtRef.current = now;
-        }
         setDetectorStatus(runtime.label);
-        const [mediaPipeDetections, transformerDetections] = await Promise.all([
-          detectObjectsForVideo(video, now),
-          shouldRunTransformers && frameDataUrl ? detectObjectsWithTransformers(frameDataUrl, 900) : Promise.resolve([]),
-        ]);
+        const mediaPipeDetections = await detectObjectsForVideo(video, now);
         if (!cancelled) {
-          const transformersRuntime = getTransformersDetectorRuntime();
           const nextDetections = mergeProposalDetections([
             ...mediaPipeDetections,
-            ...transformerDetections,
             ...motionDetections,
           ]);
+          const realDetections = persistentRealDetections(mediaPipeDetections);
+          if (realDetections.length) {
+            latestRealDetectionsRef.current = realDetections;
+          }
           setPreviewDetections(nextDetections);
           latestPreviewDetectionsRef.current = nextDetections;
           setEdgeDetectionLatencyMs(Math.round(performance.now() - detectionStartedAt));
-          setDetectorStatus(
-            transformerDetections.length
-              ? `${runtime.label}; ${transformersRuntime.label}`
-              : transformersRuntime.loading
-                ? `${runtime.label}; Transformers.js warming`
-                : runtime.label,
-          );
+          setDetectorStatus(runtime.label);
           if (edgeMetricsForFrame && frameDataUrl && now - lastRollingFrameAtRef.current >= 650) {
             lastRollingFrameAtRef.current = now;
             const imageDataUrl = frameDataUrl;
@@ -886,7 +898,7 @@ export function IndustrialVideoAnalyzer({
                   imageDataUrl,
                   timestampMs: now,
                   edgeMetrics,
-                  localDetections: nextDetections,
+                  localDetections: mergeProposalDetections([...latestRealDetectionsRef.current, ...motionDetections]),
                 },
               ].slice(-MAX_FRAMES),
             );
@@ -1080,20 +1092,26 @@ export function IndustrialVideoAnalyzer({
     if (source === "camera") {
       try {
         const mediaPipeDetections = options.lightweight ? [] : await detectObjectsForVideo(video, performance.now());
+        const realDetections = persistentRealDetections(mediaPipeDetections);
+        if (realDetections.length) {
+          latestRealDetectionsRef.current = realDetections;
+        }
         localDetections = mergeProposalDetections([
           ...mediaPipeDetections,
+          ...latestRealDetectionsRef.current,
           ...proposalResult.detections,
-          ...latestPreviewDetectionsRef.current,
         ]);
       } catch {
         localDetections = mergeProposalDetections([
+          ...latestRealDetectionsRef.current,
           ...proposalResult.detections,
-          ...latestPreviewDetectionsRef.current,
         ]);
       }
-      setPreviewDetections(localDetections);
-      latestPreviewDetectionsRef.current = localDetections;
-      updateVideoViewport();
+      if (!options.lightweight) {
+        setPreviewDetections(localDetections);
+        latestPreviewDetectionsRef.current = localDetections;
+        updateVideoViewport();
+      }
     } else {
       try {
         const imageDataUrl = canvasToJpegDataUrl(canvas, JPEG_QUALITY);
@@ -1110,10 +1128,12 @@ export function IndustrialVideoAnalyzer({
         latestPreviewDetectionsRef.current = localDetections;
         updateVideoViewport();
       } catch {
-        localDetections = proposalResult.detections;
-        setPreviewDetections(localDetections);
-        latestPreviewDetectionsRef.current = localDetections;
-        updateVideoViewport();
+        localDetections = mergeProposalDetections([...latestPreviewDetectionsRef.current, ...proposalResult.detections]);
+        if (!options.lightweight) {
+          setPreviewDetections(localDetections);
+          latestPreviewDetectionsRef.current = localDetections;
+          updateVideoViewport();
+        }
       }
     }
 
@@ -1262,6 +1282,7 @@ export function IndustrialVideoAnalyzer({
       const cloudFrames = await enrichFramesWithRoboflow(edgeSelection.frames);
       setLastFrames(cloudFrames);
       setStatus(`edge gate selected ${cloudFrames.length} of ${edgeSelection.summary.inputFrames} frames; sending to ${provider}`);
+      setAnalysis(null);
       const buildRequestBody = (selectedFrames: SampledFrame[]) => JSON.stringify({
         provider,
         mode,
@@ -1549,9 +1570,12 @@ export function IndustrialVideoAnalyzer({
         }
         setLastFrames((frames) => [...frames, frame].slice(-MAX_FRAMES));
         setLiveFrameCount((count) => count + 1);
-        const labels = frame.localDetections.length
-          ? frame.localDetections.slice(0, 3).map((detection) => `${detection.label} ${Math.round(detection.score * 100)}%`).join(", ")
-          : "no object boxes";
+        const realFrameDetections = frame.localDetections.filter(isRealObjectDetection);
+        const labels = realFrameDetections.length
+          ? realFrameDetections.slice(0, 3).map((detection) => `${detection.label} ${Math.round(detection.score * 100)}%`).join(", ")
+          : frame.localDetections.length
+            ? "motion/visual trigger"
+            : "no edge trigger";
         setLiveTranscript((items) =>
           addRecent(
             items,
@@ -1586,9 +1610,9 @@ export function IndustrialVideoAnalyzer({
                     inputFrames: 1,
                     selectedFrames: 1,
                     skippedFrames: 0,
-                    objectFrames: frame.localDetections.length ? 1 : 0,
+                    objectFrames: realFrameDetections.length ? 1 : 0,
                     motionFrames: frame.edgeMetrics.motionScore >= EDGE_MOTION_TRIGGER_SCORE ? 1 : 0,
-                    staticFrames: frame.localDetections.length || frame.edgeMetrics.motionScore >= EDGE_MOTION_TRIGGER_SCORE ? 0 : 1,
+                    staticFrames: realFrameDetections.length || frame.edgeMetrics.motionScore >= EDGE_MOTION_TRIGGER_SCORE ? 0 : 1,
                   },
                 },
               }),
@@ -1808,13 +1832,13 @@ export function IndustrialVideoAnalyzer({
         : analysis
           ? "Main result frame has the latest scene output."
           : "Press the red button to begin.";
-  const quickPresets = OBJECTIVE_PRESETS.slice(0, 6);
+  const quickPresets = OBJECTIVE_PRESETS.slice(0, 8);
   const localObjectChips = summarizeEdgeDetections(lastFrames);
   const actionPreview = analysis?.recommendations.slice(0, 3) ?? [];
   const objectChips = analysis?.objects.length ? fallbackObjectChips(analysis) : localObjectChips;
   const resultStatus = analysis ? "Scene result" : analyzing ? "Analyzing scene" : "Ready for scene result";
   const liveOverlayFrame = lastFrames.length ? lastFrames[lastFrames.length - 1] : null;
-  const liveOverlayDetections = selectDisplayDetections(source === "camera" && previewDetections.length ? previewDetections : liveOverlayFrame?.localDetections ?? [], 2);
+  const liveOverlayDetections = selectDisplayDetections(source === "camera" && previewDetections.length ? previewDetections : liveOverlayFrame?.localDetections ?? [], 4);
   const hybridEdgeContext = summarizeHybridEdgeContext(lastFrames);
   const cloudConfirmedLabels = new Set(analysis?.objects.map((object) => object.label.toLowerCase()) ?? []);
   const edgeGateLabel = edgeGateSummary
@@ -1825,7 +1849,7 @@ export function IndustrialVideoAnalyzer({
     : forceCloudAnalysis
       ? "Edge gate prefers object/motion frames; force cloud fallback is on."
       : "Edge gate waits for local objects or motion before sending frames.";
-  const edgePreviewObjectTrigger = previewDetections.some((detection) => detection.score >= EDGE_OBJECT_TRIGGER_SCORE);
+  const edgePreviewObjectTrigger = previewDetections.some((detection) => isRealObjectDetection(detection) && detection.score >= EDGE_OBJECT_TRIGGER_SCORE);
   const edgePreviewMotionTrigger = (edgePreviewMetrics?.motionScore ?? 0) >= EDGE_MOTION_TRIGGER_SCORE;
   const edgePreviewDecision = edgePreviewObjectTrigger
     ? "object trigger"
@@ -1864,6 +1888,7 @@ export function IndustrialVideoAnalyzer({
     analysis?.commentary ??
     liveCommentary ??
     "The browser runs fast edge detection first. Press record/sample, then send selected evidence frames to Gemini/OpenAI for the full answer.";
+  const videoAspectStyle: VideoAspectStyle = { "--video-aspect-ratio": videoAspectRatio };
   const springTransition = prefersReducedMotion ? { duration: 0 } : { type: "spring" as const, stiffness: 260, damping: 30 };
   const fadeUp = prefersReducedMotion
     ? {}
@@ -1879,7 +1904,7 @@ export function IndustrialVideoAnalyzer({
         <div>
           <p className="eyebrow">Cloud video analytics API showcase</p>
           <h1>Ask Gemini/OpenAI anything about live video.</h1>
-          <p className="app-subtitle">Point a camera or upload video. Browser edge models detect objects and motion first; selected evidence frames go to Gemini/OpenAI for structured video analytics.</p>
+          <p className="app-subtitle">Point a camera or upload video. Browser edge models detect people, vehicles, objects, and motion first; only triggered evidence frames go to Gemini/OpenAI for behavior, traffic, risk, and action reasoning.</p>
         </div>
         <div className="loop">
           <span>video</span>
@@ -1899,6 +1924,7 @@ export function IndustrialVideoAnalyzer({
             onPointerMove={updateZoneDraw}
             onPointerUp={endZoneDraw}
             ref={videoFrameRef}
+            style={videoAspectStyle}
             transition={springTransition}
           >
             <video muted onLoadedMetadata={updateVideoOrientation} onResize={updateVideoOrientation} playsInline ref={videoRef} />
@@ -2000,7 +2026,7 @@ export function IndustrialVideoAnalyzer({
               <div className="capture-command-header">
                 <div>
                   <span>Capture and live answer</span>
-                  <strong>{liveRunning ? "Gemini is commenting on selected live frames" : analysis ? "Latest cloud answer is ready" : "Record, stream live, or upload a clip"}</strong>
+                  <strong>{liveRunning ? "Edge triggers frames; Gemini explains behavior" : analysis ? "Latest cloud answer is ready" : "Edge detects first, cloud reasons next"}</strong>
                 </div>
                 <small>{liveFrameCount || lastFrames.length} edge / {liveUsage.requests || (analysis ? 1 : 0)} cloud</small>
               </div>
@@ -2071,7 +2097,7 @@ export function IndustrialVideoAnalyzer({
                 ) : null}
                 <div className="command-detected-row" aria-label="Detected objects">
                   <div>
-                    <span>Detected objects</span>
+                    <span>Edge trigger classes</span>
                     <strong>{objectChips.length ? `${objectChips.length} type${objectChips.length === 1 ? "" : "s"}` : "Waiting for edge"}</strong>
                   </div>
                   <div className="command-object-chips">

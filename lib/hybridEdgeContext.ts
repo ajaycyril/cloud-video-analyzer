@@ -1,4 +1,5 @@
 import type { SampledFrame } from "./videoSchema";
+import { isRealObjectDetection } from "./detectionLabels";
 
 export type EdgeObjectSummary = {
   label: string;
@@ -36,12 +37,13 @@ export function summarizeHybridEdgeContext(frames: SampledFrame[]): HybridEdgeCo
       motionFrames += 1;
     }
 
-    const strongDetections = frame.localDetections.filter((detection) => detection.score >= OBJECT_TRIGGER_SCORE);
+    const objectDetections = frame.localDetections.filter(isRealObjectDetection);
+    const strongDetections = objectDetections.filter((detection) => detection.score >= OBJECT_TRIGGER_SCORE);
     if (strongDetections.length) {
       objectFrames += 1;
     }
 
-    frame.localDetections.forEach((detection) => {
+    objectDetections.forEach((detection) => {
       detections += 1;
       const label = detection.label.toLowerCase();
       const existing = objectMap.get(label);

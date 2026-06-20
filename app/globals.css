@@ -898,7 +898,7 @@ h3 {
   border: 1px solid rgba(16, 32, 25, 0.12);
   border-radius: var(--radius);
   box-shadow: 0 24px 70px rgba(16, 32, 25, 0.18), inset 0 0 0 1px rgba(255, 255, 255, 0.06);
-  aspect-ratio: 16 / 9;
+  aspect-ratio: var(--video-aspect-ratio, 16 / 9);
   height: clamp(300px, 42svh, 520px);
   justify-self: stretch;
   max-height: 520px;
@@ -1057,8 +1057,14 @@ h3 {
   object-fit: contain;
 }
 
+.industrial-video-frame.live-camera-frame {
+  height: auto;
+  min-height: clamp(260px, 34svh, 380px);
+  max-height: min(54svh, 560px);
+}
+
 .industrial-video-frame.portrait-video {
-  height: clamp(300px, 42svh, 520px);
+  height: auto;
 }
 
 .analysis-annotation-overlay {
@@ -3077,8 +3083,9 @@ h3 {
   .industrial-video-frame.portrait-video.live-camera-frame,
   .industrial-video-frame.landscape-video.live-camera-frame,
   .industrial-video-frame.live-camera-frame {
-    height: clamp(220px, 32svh, 270px);
-    max-height: 270px;
+    height: auto;
+    min-height: clamp(230px, 32svh, 300px);
+    max-height: 42svh;
   }
 
   .first-fold-console {

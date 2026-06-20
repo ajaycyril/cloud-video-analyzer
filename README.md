@@ -4,9 +4,9 @@ Mobile-first physical AI and cloud video analytics demo.
 
 Live demo: https://cloud-video-analyzer.vercel.app
 
-This project shows how general-purpose multimodal models can be used as a flexible video analytics layer. A user can point a phone camera at a scene, upload a clip, or select a demo video, describe the analytics they need in plain language, and receive structured alerts, timeline evidence, recommended actions, latency, and estimated cloud cost.
+This project shows how a full edge-to-cloud video analytics stack can replace brittle single-purpose camera rules. A user can point a phone camera at a scene, upload a clip, or select a demo video, describe the analytics they need in plain language, and receive structured alerts, timeline evidence, recommended actions, latency, and estimated cloud cost.
 
-The core architecture is intentionally hybrid: the browser does lightweight video preprocessing, local object detection, and motion gating, then only object/motion-triggered JPEG keyframes and edge signals are sent to cloud vision APIs. The full video is not uploaded by default.
+The core architecture is intentionally hybrid: the browser acts as the edge device. It does lightweight video preprocessing, local person/vehicle/object detection, and motion gating. Only object/motion-triggered JPEG keyframes and edge signals are sent to Gemini/OpenAI/NVIDIA for higher-level reasoning. The full video is not uploaded by default.
 
 ## Screenshots
 
@@ -25,11 +25,11 @@ The core architecture is intentionally hybrid: the browser does lightweight vide
 ## What It Demonstrates
 
 - Physical AI workflow design for real-world camera input.
-- Browser edge preprocessing before cloud inference.
+- Browser edge preprocessing before cloud inference: local person, vehicle, object, and motion triggers decide which frames deserve cloud reasoning.
 - Plain-language configurable analytics instead of fixed rules.
-- Industrial-style use cases: person detection, restricted-zone alerts, PPE checks, safety hazards, operations review, queue/crowd monitoring, and asset/layout review.
+- Industrial-style use cases: person detection, restricted-zone alerts, PPE checks, safety hazards, operations review, queue/crowd monitoring, traffic buildup, and asset/layout review.
 - Multimodal provider integration with Gemini and OpenAI Vision.
-- Structured output suitable for dashboards, alert APIs, robot tasking, and human review.
+- Structured output suitable for dashboards, alert APIs, robot tasking, surveillance triage, and human review.
 - Production concerns: API-key isolation, request caps, frame sampling, payload limits, rate limiting, latency/cost display, and deployable PWA UI.
 
 ## Core User Flow
@@ -59,8 +59,8 @@ Browser preprocessing
 - capture window or full-clip keyframe sampling
 - JPEG compression
 - visual quality and motion metrics
-- local object detection
-- object/motion edge gate
+- local person/vehicle/object detection
+- object/motion edge gate: send only evidence frames
         |
         v
 Server-side provider router
@@ -78,6 +78,8 @@ Structured video analytics response
 - recommended human, automation, or robot actions
 - token usage, latency, estimated cost
 ```
+
+Example: a city camera does not need to send every frame to the cloud. The browser/edge layer can detect a person, vehicle, or motion event locally, then send only those evidence frames to the cloud model. The cloud layer answers the harder question: whether traffic is piling up, whether a person entered a restricted area, what behavior changed, and what action should be taken.
 
 ## Tech Stack
 
