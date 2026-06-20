@@ -69,6 +69,10 @@ const LIVE_CLOUD_REPEAT_MOTION_SCORE = 38;
 const LIVE_CLOUD_MIN_VISUAL_COMPLEXITY = 10;
 const LIVE_CLOUD_MIN_EDGE_DENSITY = 6;
 const LIVE_CLOUD_SCENE_DELTA_SCORE = 18;
+const DETECTION_STICKY_MS = 1800;
+const DETECTION_MIN_OVERLAP_TO_HOLD = 0.68;
+const DETECTION_CENTER_DELTA_TO_UPDATE = 0.08;
+const DETECTION_SIZE_DELTA_TO_UPDATE = 0.1;
 const EDGE_OBJECT_TRIGGER_SCORE = 0.5;
 const MOTION_GRID_COLUMNS = 18;
 const MOTION_GRID_ROWS = 12;
@@ -467,6 +471,70 @@ function proposalOverlap(a: LocalDetection, b: LocalDetection): number {
   return smallerArea > 0 ? intersection / smallerArea : 0;
 }
 
+function detectionCenterDelta(a: LocalDetection, b: LocalDetection): number {
+  const ax = a.x + a.w / 2;
+  const ay = a.y + a.h / 2;
+  const bx = b.x + b.w / 2;
+  const by = b.y + b.h / 2;
+  return Math.hypot(ax - bx, ay - by);
+}
+
+function detectionSizeDelta(a: LocalDetection, b: LocalDetection): number {
+  return Math.max(Math.abs(a.w - b.w), Math.abs(a.h - b.h));
+}
+
+function findMatchingStableDetection(next: LocalDetection, previous: LocalDetection[]): LocalDetection | null {
+  const sameLabel = previous.filter((candidate) => candidate.label.toLowerCase() === next.label.toLowerCase());
+  if (!sameLabel.length) {
+    return null;
+  }
+  return sameLabel
+    .map((candidate) => ({
+      candidate,
+      overlap: proposalOverlap(candidate, next),
+      centerDelta: detectionCenterDelta(candidate, next),
+    }))
+    .sort((left, right) => right.overlap - left.overlap || left.centerDelta - right.centerDelta)[0]?.candidate ?? null;
+}
+
+function stabilizePreviewDetections(nextDetections: LocalDetection[], previousDetections: LocalDetection[], lastSeenAt: number, now: number): {
+  detections: LocalDetection[];
+  observed: boolean;
+} {
+  if (!nextDetections.length) {
+    return {
+      detections: now - lastSeenAt <= DETECTION_STICKY_MS ? previousDetections : [],
+      observed: false,
+    };
+  }
+
+  let changed = nextDetections.length !== previousDetections.length;
+  const detections = nextDetections.map((nextDetection) => {
+    const previousDetection = findMatchingStableDetection(nextDetection, previousDetections);
+    if (!previousDetection) {
+      changed = true;
+      return nextDetection;
+    }
+    const overlap = proposalOverlap(previousDetection, nextDetection);
+    const centerDelta = detectionCenterDelta(previousDetection, nextDetection);
+    const sizeDelta = detectionSizeDelta(previousDetection, nextDetection);
+    if (
+      overlap < DETECTION_MIN_OVERLAP_TO_HOLD ||
+      centerDelta >= DETECTION_CENTER_DELTA_TO_UPDATE ||
+      sizeDelta >= DETECTION_SIZE_DELTA_TO_UPDATE
+    ) {
+      changed = true;
+      return nextDetection;
+    }
+    return previousDetection;
+  });
+
+  return {
+    detections: changed ? detections : previousDetections,
+    observed: true,
+  };
+}
+
 function mergeProposalDetections(detections: LocalDetection[]): LocalDetection[] {
   const realDetections = detections.filter((detection) => !isProposalDetection(detection)).sort((left, right) => right.score - left.score);
   const proposals = detections.filter(isProposalDetection).sort((left, right) => right.score - left.score);
@@ -629,6 +697,8 @@ export function IndustrialVideoAnalyzer({
   const latestPreviewDetectionsRef = useRef<LocalDetection[]>([]);
   const latestRealDetectionsRef = useRef<LocalDetection[]>([]);
   const latestMotionDetectionsRef = useRef<LocalDetection[]>([]);
+  const stablePreviewDetectionsRef = useRef<LocalDetection[]>([]);
+  const stablePreviewSeenAtRef = useRef(0);
   const lastRollingFrameAtRef = useRef(0);
   const lastEvidenceFrameRef = useRef<SampledFrame | null>(null);
   const motionSnapshotRef = useRef<MotionSnapshot | null>(null);
@@ -820,6 +890,8 @@ export function IndustrialVideoAnalyzer({
       previousFrameRef.current = null;
       motionSnapshotRef.current = null;
       latestPreviewDetectionsRef.current = [];
+      stablePreviewDetectionsRef.current = [];
+      stablePreviewSeenAtRef.current = 0;
       latestRealDetectionsRef.current = [];
       latestMotionDetectionsRef.current = [];
       lastEvidenceFrameRef.current = null;
@@ -855,6 +927,8 @@ export function IndustrialVideoAnalyzer({
     setRunning(false);
     setPreviewDetections([]);
     latestPreviewDetectionsRef.current = [];
+    stablePreviewDetectionsRef.current = [];
+    stablePreviewSeenAtRef.current = 0;
     latestRealDetectionsRef.current = [];
     latestMotionDetectionsRef.current = [];
     lastEvidenceFrameRef.current = null;
@@ -881,6 +955,8 @@ export function IndustrialVideoAnalyzer({
 
     if (source !== "camera" || !running) {
       latestPreviewDetectionsRef.current = [];
+      stablePreviewDetectionsRef.current = [];
+      stablePreviewSeenAtRef.current = 0;
       latestRealDetectionsRef.current = [];
       latestMotionDetectionsRef.current = [];
       lastEvidenceFrameRef.current = null;
@@ -933,6 +1009,25 @@ export function IndustrialVideoAnalyzer({
       setLastFrames((frames) => [...frames, candidateFrame].slice(-MAX_FRAMES));
     };
 
+    const publishPreviewDetections = (nextDetections: LocalDetection[], now: number) => {
+      const stable = stabilizePreviewDetections(
+        nextDetections,
+        stablePreviewDetectionsRef.current,
+        stablePreviewSeenAtRef.current,
+        now,
+      );
+      if (stable.observed) {
+        stablePreviewSeenAtRef.current = now;
+      }
+      if (stable.detections === stablePreviewDetectionsRef.current) {
+        return;
+      }
+      stablePreviewDetectionsRef.current = stable.detections;
+      latestPreviewDetectionsRef.current = stable.detections;
+      setPreviewDetections(stable.detections);
+      updateVideoViewport();
+    };
+
     const runObjectDetection = (video: HTMLVideoElement, now: number, frameDataUrl: string | null) => {
       if (objectDetectionBusyRef.current || now - lastObjectDetectionAtRef.current < OBJECT_DETECTION_INTERVAL_MS) {
         return;
@@ -965,12 +1060,10 @@ export function IndustrialVideoAnalyzer({
             ...realDetections,
             ...latestMotionDetectionsRef.current,
           ]);
-          setPreviewDetections(nextDetections);
-          latestPreviewDetectionsRef.current = nextDetections;
+          publishPreviewDetections(nextDetections, now);
           setEdgeDetectionLatencyMs(Math.round(performance.now() - startedAt));
           const transformersRuntime = getTransformersDetectorRuntime();
           setDetectorStatus(transformerDetections.length ? `${getObjectDetectorRuntime().label}; ${transformersRuntime.label}` : getObjectDetectorRuntime().label);
-          updateVideoViewport();
         })
         .catch(() => {
           if (!cancelled) {
@@ -1018,12 +1111,12 @@ export function IndustrialVideoAnalyzer({
               setEdgePreviewFrameCount((count) => count + 1);
               setEdgeDetectionLatencyMs(Math.round(performance.now() - detectionStartedAt));
               if (immediateDetections.length) {
-                setPreviewDetections(immediateDetections);
-                latestPreviewDetectionsRef.current = immediateDetections;
-                updateVideoViewport();
+                publishPreviewDetections(immediateDetections, now);
               } else if (!getObjectDetectorRuntime().ready) {
                 setPreviewDetections([]);
                 latestPreviewDetectionsRef.current = [];
+                stablePreviewDetectionsRef.current = [];
+                stablePreviewSeenAtRef.current = 0;
               }
               if (frameDataUrl) {
                 publishRollingFrame(now, frameDataUrl, result.metrics, motionDetections);
@@ -1040,13 +1133,11 @@ export function IndustrialVideoAnalyzer({
               ...latestRealDetectionsRef.current,
               ...strongMotionDetections,
             ]);
-            setPreviewDetections(fallbackDetections);
-            latestPreviewDetectionsRef.current = fallbackDetections;
+            publishPreviewDetections(fallbackDetections, now);
             latestMotionDetectionsRef.current = strongMotionDetections;
             if (edgeMetricsForFrame && frameDataUrl) {
               publishRollingFrame(now, frameDataUrl, edgeMetricsForFrame, motionDetections);
             }
-            updateVideoViewport();
           }
           setDetectorStatus("Motion edge active; object model still loading");
         }
@@ -1108,6 +1199,8 @@ export function IndustrialVideoAnalyzer({
       setSource("file");
       setPreviewDetections([]);
       latestPreviewDetectionsRef.current = [];
+      stablePreviewDetectionsRef.current = [];
+      stablePreviewSeenAtRef.current = 0;
       lastEvidenceFrameRef.current = null;
       motionSnapshotRef.current = null;
       setEdgePreviewMetrics(null);
@@ -1140,6 +1233,8 @@ export function IndustrialVideoAnalyzer({
     setSource("sample");
     setPreviewDetections([]);
     latestPreviewDetectionsRef.current = [];
+    stablePreviewDetectionsRef.current = [];
+    stablePreviewSeenAtRef.current = 0;
     lastEvidenceFrameRef.current = null;
     motionSnapshotRef.current = null;
     setEdgePreviewMetrics(null);
@@ -1170,6 +1265,8 @@ export function IndustrialVideoAnalyzer({
       setSource("sample");
       setPreviewDetections([]);
       latestPreviewDetectionsRef.current = [];
+      stablePreviewDetectionsRef.current = [];
+      stablePreviewSeenAtRef.current = 0;
       lastEvidenceFrameRef.current = null;
       motionSnapshotRef.current = null;
       setEdgePreviewMetrics(null);
@@ -1535,6 +1632,8 @@ export function IndustrialVideoAnalyzer({
     setLastFrames([]);
     setPreviewDetections([]);
     latestPreviewDetectionsRef.current = [];
+    stablePreviewDetectionsRef.current = [];
+    stablePreviewSeenAtRef.current = 0;
     motionSnapshotRef.current = null;
     setEdgePreviewMetrics(null);
     setEdgePreviewFrameCount(0);
@@ -2007,7 +2106,7 @@ export function IndustrialVideoAnalyzer({
                   <motion.div
                     layout
                     className={`live-detection-box ${isProposalDetection(detection) ? "edge-proposal" : ""} ${cloudConfirmedLabels.has(detection.label.toLowerCase()) ? "cloud-confirmed" : ""}`}
-                    key={`${detection.label}-${index}-${detection.x}-${detection.y}`}
+                    key={`${detection.label}-${index}`}
                     initial={prefersReducedMotion ? false : { opacity: 0, scale: 0.96 }}
                     animate={{ opacity: 1, scale: 1 }}
                     exit={prefersReducedMotion ? undefined : { opacity: 0, scale: 0.96 }}
