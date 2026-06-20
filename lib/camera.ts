@@ -19,10 +19,12 @@ export function buildVideoConstraints(mode: Mode, deviceId: string | null, facin
       ? {
           width: { ideal: 1280 },
           height: { ideal: 720 },
+          aspectRatio: { ideal: 16 / 9 },
         }
       : {
           width: { ideal: 1920 },
           height: { ideal: 1080 },
+          aspectRatio: { ideal: 16 / 9 },
         };
 
   if (deviceId) {

@@ -962,11 +962,13 @@ h3 {
 
 .live-detection-box.edge-proposal {
   border-style: dashed;
-  border-color: #10b981;
+  border-color: #f8fafc;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.85), 0 8px 22px rgba(0, 0, 0, 0.35);
 }
 
 .live-detection-box.edge-proposal span {
-  background: rgba(16, 185, 129, 0.92);
+  background: rgba(6, 20, 13, 0.9);
+  color: #ecfdf5;
 }
 
 .edge-live-hud {

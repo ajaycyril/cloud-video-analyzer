@@ -57,7 +57,9 @@ type MotionSnapshot = {
 const MAX_FRAMES = 4;
 const MAX_CLOUD_FRAMES = 3;
 const CAMERA_CAPTURE_WINDOW_MS = 1600;
-const PREVIEW_DETECTION_INTERVAL_MS = 120;
+const PREVIEW_DETECTION_INTERVAL_MS = 90;
+const OBJECT_DETECTION_INTERVAL_MS = 420;
+const ROLLING_EVIDENCE_INTERVAL_MS = 550;
 const SMART_RECORDING_MIN_MS = 1100;
 const SMART_RECORDING_MAX_MS = 2200;
 const SMART_RECORDING_INTERVAL_MS = 320;
@@ -539,9 +541,13 @@ export function IndustrialVideoAnalyzer({
   const liveLastCloudAtRef = useRef(0);
   const previewDetectionFrameRef = useRef<number | null>(null);
   const previewDetectionBusyRef = useRef(false);
+  const objectDetectionBusyRef = useRef(false);
+  const detectorWarmupRef = useRef<Promise<void> | null>(null);
   const lastPreviewDetectionAtRef = useRef(0);
+  const lastObjectDetectionAtRef = useRef(0);
   const latestPreviewDetectionsRef = useRef<LocalDetection[]>([]);
   const latestRealDetectionsRef = useRef<LocalDetection[]>([]);
+  const latestMotionDetectionsRef = useRef<LocalDetection[]>([]);
   const lastRollingFrameAtRef = useRef(0);
   const motionSnapshotRef = useRef<MotionSnapshot | null>(null);
   const previousFrameRef = useRef<EdgeMetricResult["snapshot"] | null>(null);
@@ -701,7 +707,7 @@ export function IndustrialVideoAnalyzer({
     updateVideoOrientation();
   }, [updateVideoOrientation]);
 
-  const startCamera = useCallback(async (nextFacing: CameraFacing = cameraFacing, deviceId: string | null = selectedDeviceId) => {
+  const startCamera = useCallback(async (nextFacing: CameraFacing = cameraFacing, deviceId: string | null = null) => {
     setError(null);
     setCameraFacing(nextFacing);
     setStatus(`requesting ${nextFacing === "environment" ? "back" : "front"} camera permission`);
@@ -732,6 +738,7 @@ export function IndustrialVideoAnalyzer({
       motionSnapshotRef.current = null;
       latestPreviewDetectionsRef.current = [];
       latestRealDetectionsRef.current = [];
+      latestMotionDetectionsRef.current = [];
       setPreviewDetections([]);
       setEdgePreviewMetrics(null);
       setEdgePreviewFrameCount(0);
@@ -744,7 +751,7 @@ export function IndustrialVideoAnalyzer({
       setStatus("camera off - no recording");
       setError(readableError(startError));
     }
-  }, [cameraFacing, clearVideoObjectUrl, refreshDevices, selectedDeviceId, updateVideoOrientation]);
+  }, [cameraFacing, clearVideoObjectUrl, refreshDevices, updateVideoOrientation]);
 
   const stopCamera = useCallback(() => {
     if (liveTimerRef.current) {
@@ -765,6 +772,7 @@ export function IndustrialVideoAnalyzer({
     setPreviewDetections([]);
     latestPreviewDetectionsRef.current = [];
     latestRealDetectionsRef.current = [];
+    latestMotionDetectionsRef.current = [];
     motionSnapshotRef.current = null;
     setEdgePreviewMetrics(null);
     setEdgePreviewFrameCount(0);
@@ -784,10 +792,12 @@ export function IndustrialVideoAnalyzer({
       previewDetectionFrameRef.current = null;
     }
     previewDetectionBusyRef.current = false;
+    objectDetectionBusyRef.current = false;
 
     if (source !== "camera" || !running) {
       latestPreviewDetectionsRef.current = [];
       latestRealDetectionsRef.current = [];
+      latestMotionDetectionsRef.current = [];
       motionSnapshotRef.current = null;
       lastRollingFrameAtRef.current = 0;
       return;
@@ -795,9 +805,91 @@ export function IndustrialVideoAnalyzer({
 
     let cancelled = false;
     lastPreviewDetectionAtRef.current = 0;
+    lastObjectDetectionAtRef.current = 0;
     lastRollingFrameAtRef.current = 0;
 
-  const runPreviewDetection = async (now: number) => {
+    const warmDetector = () => {
+      if (detectorWarmupRef.current) {
+        return;
+      }
+      detectorWarmupRef.current = tryCreateObjectDetector()
+        .then((nextRuntime) => {
+          if (!cancelled) {
+            setDetectorStatus(nextRuntime.label);
+          }
+        })
+        .finally(() => {
+          detectorWarmupRef.current = null;
+        });
+    };
+
+    const publishRollingFrame = (now: number, imageDataUrl: string, edgeMetrics: EdgeMetricResult["metrics"], motionDetections: LocalDetection[]) => {
+      if (now - lastRollingFrameAtRef.current < ROLLING_EVIDENCE_INTERVAL_MS) {
+        return;
+      }
+      lastRollingFrameAtRef.current = now;
+      const localDetections = mergeProposalDetections([
+        ...latestRealDetectionsRef.current,
+        ...motionDetections,
+      ]);
+      setLastFrames((frames) =>
+        [
+          ...frames,
+          {
+            imageDataUrl,
+            timestampMs: now,
+            edgeMetrics,
+            localDetections,
+          },
+        ].slice(-MAX_FRAMES),
+      );
+    };
+
+    const runObjectDetection = (video: HTMLVideoElement, now: number) => {
+      if (objectDetectionBusyRef.current || now - lastObjectDetectionAtRef.current < OBJECT_DETECTION_INTERVAL_MS) {
+        return;
+      }
+      const runtime = getObjectDetectorRuntime();
+      if (!runtime.ready) {
+        warmDetector();
+        setDetectorStatus(latestMotionDetectionsRef.current.length ? "Fast motion edge active; object model warming" : runtime.label);
+        return;
+      }
+
+      objectDetectionBusyRef.current = true;
+      lastObjectDetectionAtRef.current = now;
+      const startedAt = performance.now();
+      void detectObjectsForVideo(video, now)
+        .then((mediaPipeDetections) => {
+          if (cancelled) {
+            return;
+          }
+          const realDetections = persistentRealDetections(mediaPipeDetections);
+          if (realDetections.length) {
+            latestRealDetectionsRef.current = realDetections;
+          }
+          const nextDetections = mergeProposalDetections([
+            ...mediaPipeDetections,
+            ...latestMotionDetectionsRef.current,
+          ]);
+          setPreviewDetections(nextDetections);
+          latestPreviewDetectionsRef.current = nextDetections;
+          setEdgeDetectionLatencyMs(Math.round(performance.now() - startedAt));
+          setDetectorStatus(getObjectDetectorRuntime().label);
+          updateVideoViewport();
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setDetectorStatus("Fast motion edge active; object detector restarting");
+            warmDetector();
+          }
+        })
+        .finally(() => {
+          objectDetectionBusyRef.current = false;
+        });
+    };
+
+    const runPreviewDetection = (now: number) => {
       if (previewDetectionBusyRef.current) {
         return;
       }
@@ -823,11 +915,13 @@ export function IndustrialVideoAnalyzer({
             frameDataUrl = canvasToJpegDataUrl(canvas, JPEG_QUALITY);
             motionDetections = motionResult.detections;
             if (!cancelled) {
+              latestMotionDetectionsRef.current = motionDetections;
               const immediateDetections = motionDetections.length
                 ? mergeProposalDetections(motionDetections)
                 : persistentRealDetections(latestPreviewDetectionsRef.current);
               setEdgePreviewMetrics(result.metrics);
               setEdgePreviewFrameCount((count) => count + 1);
+              setEdgeDetectionLatencyMs(Math.round(performance.now() - detectionStartedAt));
               if (immediateDetections.length) {
                 setPreviewDetections(immediateDetections);
                 latestPreviewDetectionsRef.current = immediateDetections;
@@ -836,95 +930,21 @@ export function IndustrialVideoAnalyzer({
                 setPreviewDetections([]);
                 latestPreviewDetectionsRef.current = [];
               }
-            }
-          }
-        }
-        const runtime = getObjectDetectorRuntime();
-        if (!runtime.ready) {
-          void tryCreateObjectDetector().then((nextRuntime) => {
-            if (!cancelled) {
-              setDetectorStatus(nextRuntime.label);
-            }
-          });
-          if (!cancelled) {
-            setDetectorStatus(motionDetections.length ? "Instant motion edge active; object model warming" : runtime.label);
-              setEdgeDetectionLatencyMs(Math.round(performance.now() - detectionStartedAt));
-              if (edgeMetricsForFrame && frameDataUrl && now - lastRollingFrameAtRef.current >= 650) {
-                lastRollingFrameAtRef.current = now;
-                const imageDataUrl = frameDataUrl;
-                const edgeMetrics = edgeMetricsForFrame;
-                const frameDetections = mergeProposalDetections([
-                  ...latestRealDetectionsRef.current,
-                  ...motionDetections,
-                ]);
-                setLastFrames((frames) =>
-                  [
-                    ...frames,
-                    {
-                      imageDataUrl,
-                      timestampMs: now,
-                      edgeMetrics,
-                      localDetections: frameDetections,
-                    },
-                  ].slice(-MAX_FRAMES),
-                );
+              if (frameDataUrl) {
+                publishRollingFrame(now, frameDataUrl, result.metrics, motionDetections);
               }
+            }
           }
-          return;
         }
-        setDetectorStatus(runtime.label);
-        const mediaPipeDetections = await detectObjectsForVideo(video, now);
-        if (!cancelled) {
-          const nextDetections = mergeProposalDetections([
-            ...mediaPipeDetections,
-            ...motionDetections,
-          ]);
-          const realDetections = persistentRealDetections(mediaPipeDetections);
-          if (realDetections.length) {
-            latestRealDetectionsRef.current = realDetections;
-          }
-          setPreviewDetections(nextDetections);
-          latestPreviewDetectionsRef.current = nextDetections;
-          setEdgeDetectionLatencyMs(Math.round(performance.now() - detectionStartedAt));
-          setDetectorStatus(runtime.label);
-          if (edgeMetricsForFrame && frameDataUrl && now - lastRollingFrameAtRef.current >= 650) {
-            lastRollingFrameAtRef.current = now;
-            const imageDataUrl = frameDataUrl;
-            const edgeMetrics = edgeMetricsForFrame;
-            setLastFrames((frames) =>
-              [
-                ...frames,
-                {
-                  imageDataUrl,
-                  timestampMs: now,
-                  edgeMetrics,
-                  localDetections: mergeProposalDetections([...latestRealDetectionsRef.current, ...motionDetections]),
-                },
-              ].slice(-MAX_FRAMES),
-            );
-          }
-          updateVideoViewport();
-        }
+        runObjectDetection(video, now);
       } catch {
         if (!cancelled) {
           if (motionDetections.length) {
             setPreviewDetections(motionDetections);
             latestPreviewDetectionsRef.current = motionDetections;
-            if (edgeMetricsForFrame && frameDataUrl && now - lastRollingFrameAtRef.current >= 650) {
-              lastRollingFrameAtRef.current = now;
-              const imageDataUrl = frameDataUrl;
-              const edgeMetrics = edgeMetricsForFrame;
-              setLastFrames((frames) =>
-                [
-                  ...frames,
-                  {
-                    imageDataUrl,
-                    timestampMs: now,
-                    edgeMetrics,
-                    localDetections: motionDetections,
-                  },
-                ].slice(-MAX_FRAMES),
-              );
+            latestMotionDetectionsRef.current = motionDetections;
+            if (edgeMetricsForFrame && frameDataUrl) {
+              publishRollingFrame(now, frameDataUrl, edgeMetricsForFrame, motionDetections);
             }
             updateVideoViewport();
           }
@@ -943,12 +963,9 @@ export function IndustrialVideoAnalyzer({
       if (!previewDetectionBusyRef.current && elapsedSinceDetection >= PREVIEW_DETECTION_INTERVAL_MS) {
         const previousDetectionAt = lastPreviewDetectionAtRef.current;
         lastPreviewDetectionAtRef.current = now;
-        void runPreviewDetection(now).finally(() => {
-          if (!cancelled) {
-            setEdgeLoopFps(previousDetectionAt ? Math.round(1000 / Math.max(1, now - previousDetectionAt)) : 0);
-            previewDetectionFrameRef.current = window.requestAnimationFrame(tick);
-          }
-        });
+        runPreviewDetection(now);
+        setEdgeLoopFps(previousDetectionAt ? Math.round(1000 / Math.max(1, now - previousDetectionAt)) : 0);
+        previewDetectionFrameRef.current = window.requestAnimationFrame(tick);
         return;
       }
       previewDetectionFrameRef.current = window.requestAnimationFrame(tick);
@@ -963,6 +980,7 @@ export function IndustrialVideoAnalyzer({
         previewDetectionFrameRef.current = null;
       }
       previewDetectionBusyRef.current = false;
+      objectDetectionBusyRef.current = false;
     };
   }, [running, source, updateVideoViewport]);
 
