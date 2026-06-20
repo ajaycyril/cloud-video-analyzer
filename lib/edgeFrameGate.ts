@@ -2,8 +2,8 @@ import type { SampledFrame } from "./videoSchema";
 import { isRealObjectDetection } from "./detectionLabels";
 
 const DEFAULT_MAX_CLOUD_FRAMES = 3;
-const MOTION_TRIGGER_SCORE = 8;
-const MIN_DETECTION_SCORE = 0.5;
+const MOTION_TRIGGER_SCORE = 18;
+const MIN_DETECTION_SCORE = 0.62;
 
 type EdgeGateOptions = {
   allowFallback?: boolean;

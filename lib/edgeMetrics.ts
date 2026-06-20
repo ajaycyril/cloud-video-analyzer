@@ -132,14 +132,30 @@ export function computeEdgeMetrics(imageData: ImageData, previous: PreviousFrame
   };
 }
 
-export function captureVideoFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement, maxWidth = 560): ImageData | null {
+export function captureVideoFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement, maxWidth = 560, targetAspectRatio?: number): ImageData | null {
   if (!video.videoWidth || !video.videoHeight) {
     return null;
   }
 
-  const scale = Math.min(1, maxWidth / video.videoWidth);
-  const width = Math.max(1, Math.round(video.videoWidth * scale));
-  const height = Math.max(1, Math.round(video.videoHeight * scale));
+  let sourceX = 0;
+  let sourceY = 0;
+  let sourceWidth = video.videoWidth;
+  let sourceHeight = video.videoHeight;
+
+  if (targetAspectRatio && targetAspectRatio > 0) {
+    const sourceAspectRatio = video.videoWidth / video.videoHeight;
+    if (sourceAspectRatio > targetAspectRatio) {
+      sourceWidth = Math.round(video.videoHeight * targetAspectRatio);
+      sourceX = Math.round((video.videoWidth - sourceWidth) / 2);
+    } else if (sourceAspectRatio < targetAspectRatio) {
+      sourceHeight = Math.round(video.videoWidth / targetAspectRatio);
+      sourceY = Math.round((video.videoHeight - sourceHeight) / 2);
+    }
+  }
+
+  const scale = Math.min(1, maxWidth / sourceWidth);
+  const width = Math.max(1, Math.round(sourceWidth * scale));
+  const height = Math.max(1, Math.round(sourceHeight * scale));
   canvas.width = width;
   canvas.height = height;
 
@@ -147,7 +163,7 @@ export function captureVideoFrame(video: HTMLVideoElement, canvas: HTMLCanvasEle
   if (!context) {
     return null;
   }
-  context.drawImage(video, 0, 0, width, height);
+  context.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, width, height);
   return context.getImageData(0, 0, width, height);
 }
 
