@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { selectEdgeTriggeredFrames } from "@/lib/edgeFrameGate";
+import { trackServerProductEvent } from "@/lib/serverAnalytics";
 import { analyzeVideo } from "@/lib/videoProviders";
 import { videoAnalysisRequestSchema } from "@/lib/videoSchema";
 import type { ProviderId } from "@/lib/videoSchema";
@@ -129,6 +130,12 @@ export async function POST(request: Request) {
   const edgeSelection = selectEdgeTriggeredFrames(parsed.data.frames, 3, { allowFallback: parsed.data.sampling.forceCloud });
   const cloudFrames = edgeSelection.frames;
   if (!cloudFrames.length) {
+    trackServerProductEvent("API edge gate blocked", {
+      provider: parsed.data.provider,
+      source: parsed.data.source,
+      mode: parsed.data.mode,
+      input_frames: parsed.data.frames.length,
+    });
     return typedError("EDGE_GATE_NO_TRIGGER", "Browser edge gate found no object or motion frames. Enable force cloud analysis to send the best sampled frames anyway.", 422);
   }
 
@@ -151,6 +158,14 @@ export async function POST(request: Request) {
 
   try {
     const analysis = await analyzeVideo(analysisRequest);
+    trackServerProductEvent("API analysis completed", {
+      provider: analysis.provider,
+      source: parsed.data.source,
+      mode: parsed.data.mode,
+      frames: cloudFrames.length,
+      latency_ms: analysis.usage.latencyMs,
+      estimated_cost_usd: Number(analysis.usage.estimatedCostUsd.toFixed(6)),
+    });
     return NextResponse.json(analysis, {
       headers: baseHeaders({
         "x-video-provider": analysis.provider,
@@ -165,6 +180,14 @@ export async function POST(request: Request) {
         const analysis = await analyzeVideo({
           ...analysisRequest,
           provider: alternateProvider,
+        });
+        trackServerProductEvent("API analysis failover completed", {
+          from_provider: parsed.data.provider,
+          provider: analysis.provider,
+          source: parsed.data.source,
+          mode: parsed.data.mode,
+          frames: cloudFrames.length,
+          latency_ms: analysis.usage.latencyMs,
         });
         return NextResponse.json(analysis, {
           headers: baseHeaders({
@@ -190,6 +213,13 @@ export async function POST(request: Request) {
       provider: parsed.data.provider,
       mode: parsed.data.mode,
       source: parsed.data.source,
+      frames: cloudFrames.length,
+      code: modelErrorCode(message),
+    });
+    trackServerProductEvent("API analysis failed", {
+      provider: parsed.data.provider,
+      source: parsed.data.source,
+      mode: parsed.data.mode,
       frames: cloudFrames.length,
       code: modelErrorCode(message),
     });

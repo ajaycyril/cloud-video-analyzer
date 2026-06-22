@@ -9,6 +9,7 @@ import { selectEdgeTriggeredFrames, type EdgeGateSummary } from "@/lib/edgeFrame
 import { canvasToJpegDataUrl, captureVideoFrame, computeEdgeMetrics, type EdgeMetricResult } from "@/lib/edgeMetrics";
 import { summarizeHybridEdgeContext } from "@/lib/hybridEdgeContext";
 import { detectObjectsForVideo, getObjectDetectorRuntime, tryCreateObjectDetector } from "@/lib/mediaPipeDetector";
+import { trackProductEvent } from "@/lib/productAnalytics";
 import { fallbackObjectChips, summarizeEdgeDetections, type EdgeDetectionSummary } from "@/lib/resultPresentation";
 import { detectObjectsWithTransformers, getTransformersDetectorRuntime, shouldUseTransformersDetector } from "@/lib/transformersDetector";
 import type { LocalDetection } from "@/lib/types";
@@ -777,6 +778,15 @@ export function IndustrialVideoAnalyzer({
   }, [analysesUsed]);
 
   useEffect(() => {
+    trackProductEvent("Demo opened", {
+      gemini_ready: providerStatus.gemini,
+      openai_ready: providerStatus.openai,
+      nvidia_ready: providerStatus.nvidia,
+      roboflow_ready: roboflowReady,
+    });
+  }, [providerStatus.gemini, providerStatus.nvidia, providerStatus.openai, roboflowReady]);
+
+  useEffect(() => {
     let cancelled = false;
     const warmDetector = () => {
       setDetectorStatus((current) => (current.includes("active") ? current : "Warming browser edge detector"));
@@ -1494,6 +1504,13 @@ export function IndustrialVideoAnalyzer({
       if (!edgeSelection.frames.length) {
         setStatus("edge gate held cloud request - no object or motion trigger");
         setError("No cloud request sent: the browser did not detect a usable object or motion trigger. Use Ask cloud now for a one-time manual override.");
+        trackProductEvent("Edge gate blocked cloud", {
+          provider,
+          source,
+          mode,
+          input_frames: frames.length,
+          manual_override: Boolean(options.manualOverride),
+        });
         return false;
       }
       const cloudFrames = await enrichFramesWithRoboflow(edgeSelection.frames);
@@ -1563,10 +1580,26 @@ export function IndustrialVideoAnalyzer({
       setAnalysis(nextAnalysis);
       setError(null);
       setStatus(failover ? `fallback ${failover} complete in ${nextAnalysis.usage.latencyMs}ms` : `${nextAnalysis.provider} analysis complete in ${nextAnalysis.usage.latencyMs}ms`);
+      trackProductEvent("Cloud analysis completed", {
+        provider: nextAnalysis.provider,
+        source,
+        mode,
+        frames: nextAnalysis.edgeAssessment.framesAnalyzed,
+        latency_ms: nextAnalysis.usage.latencyMs,
+        estimated_cost_usd: Number(nextAnalysis.usage.estimatedCostUsd.toFixed(6)),
+        manual_override: Boolean(options.manualOverride),
+      });
       return true;
     } catch (analysisError) {
       setError(readableError(analysisError));
       setStatus("analysis error");
+      trackProductEvent("Cloud analysis failed", {
+        provider,
+        source,
+        mode,
+        input_frames: frames.length,
+        manual_override: Boolean(options.manualOverride),
+      });
       return false;
     }
   }, [enrichFramesWithRoboflow, forceCloudAnalysis, mode, objective, provider, providerStatus, source, zones]);
@@ -1728,6 +1761,11 @@ export function IndustrialVideoAnalyzer({
           liveLastCloudSignatureRef.current = cloudSceneSignature(frame);
           liveLastCloudFrameRef.current = frame;
           setLiveStatus("Gemini reading latest snapshot");
+          trackProductEvent("Live auto cloud triggered", {
+            reason: cloudDecision.reason,
+            objects: realFrameDetections.length,
+            motion_score: Math.round(frame.edgeMetrics.motionScore),
+          });
           try {
             const response = await fetch("/api/analyze-video", {
               method: "POST",
@@ -1771,8 +1809,17 @@ export function IndustrialVideoAnalyzer({
                 lastLatencyMs: nextAnalysis.usage.latencyMs,
               }));
               setLiveEvents((items) => addRecent(items, `${nextAnalysis.edgeAssessment.framesAnalyzed} frame / ${formatCost(nextAnalysis.usage.estimatedCostUsd)}`, 5));
+              trackProductEvent("Live cloud completed", {
+                provider: nextAnalysis.provider,
+                frames: nextAnalysis.edgeAssessment.framesAnalyzed,
+                latency_ms: nextAnalysis.usage.latencyMs,
+                estimated_cost_usd: Number(nextAnalysis.usage.estimatedCostUsd.toFixed(6)),
+              });
             } else {
               setLiveStatus("Gemini live snapshot skipped");
+              trackProductEvent("Live cloud skipped", {
+                status: response.status,
+              });
               if (payload?.detail || payload?.error) {
                 setLiveEvents((items) => addRecent(items, `Cloud skipped: ${payload.detail ?? payload.error}`, 5));
               }
@@ -1780,6 +1827,9 @@ export function IndustrialVideoAnalyzer({
           } catch {
             setLiveStatus("Gemini live retrying");
             setLiveEvents((items) => addRecent(items, "Cloud commentary retrying on next snapshot", 5));
+            trackProductEvent("Live cloud failed", {
+              provider: "gemini",
+            });
           } finally {
             liveCloudBusyRef.current = false;
           }
@@ -1812,11 +1862,18 @@ export function IndustrialVideoAnalyzer({
       }
       await waitForVideoData(video);
       startLocalLiveStream("Live edge camera started.");
+      trackProductEvent("AI stream started", {
+        camera_facing: cameraFacing,
+        provider: "gemini",
+      });
     } catch (liveError) {
       setLiveRunning(false);
       setLiveStatus("Live camera error");
       setError(readableError(liveError));
       setLiveTranscript((items) => addRecent(items, readableError(liveError)));
+      trackProductEvent("AI stream start failed", {
+        camera_facing: cameraFacing,
+      });
     }
   }, [cameraFacing, captureOneFrame, mode, objective, providerStatus.gemini, running, source, startCamera, zones]);
 
@@ -2210,9 +2267,19 @@ export function IndustrialVideoAnalyzer({
                   onClick={(event) => {
                     if (source === "camera") {
                       event.preventDefault();
+                      trackProductEvent("AI stream start clicked", {
+                        source,
+                        camera_facing: cameraFacing,
+                        location: "primary_button",
+                      });
                       void startGeminiLive();
                       return;
                     }
+                    trackProductEvent("Clip analyze clicked", {
+                      source,
+                      provider,
+                      mode,
+                    });
                     void recordOrAnalyze();
                   }}
                   type="button"
@@ -2220,15 +2287,37 @@ export function IndustrialVideoAnalyzer({
                   <span className="record-dot" /> {analyzeButtonText}
                 </motion.button>
                 {isLiveSource ? (
-                  <motion.button className="send-cloud-button" disabled={!canSendCloud} onClick={() => void sendLatestFramesToCloud({ manualOverride: true })} type="button" whileTap={prefersReducedMotion ? undefined : { scale: 0.98 }}>
+                  <motion.button className="send-cloud-button" disabled={!canSendCloud} onClick={() => {
+                    trackProductEvent("Manual cloud clicked", {
+                      source,
+                      provider,
+                      evidence_frames: lastFrames.length,
+                      live_running: liveRunning,
+                    });
+                    void sendLatestFramesToCloud({ manualOverride: true });
+                  }} type="button" whileTap={prefersReducedMotion ? undefined : { scale: 0.98 }}>
                     Ask cloud now
                     <span>{hasLocalEdgeFrames ? `manual override - ${lastFrames.length} evidence frame${lastFrames.length === 1 ? "" : "s"}` : source === "camera" && running ? "capture fresh edge frame" : "waiting for camera"}</span>
                   </motion.button>
                 ) : null}
-                <button className={`live-command-button ${liveRunning ? "active" : ""}`} disabled={liveRunning} onClick={() => void startGeminiLive()} type="button">
+                <button className={`live-command-button ${liveRunning ? "active" : ""}`} disabled={liveRunning} onClick={() => {
+                  trackProductEvent("AI stream start clicked", {
+                    source,
+                    camera_facing: cameraFacing,
+                    location: "auto_cloud_button",
+                  });
+                  void startGeminiLive();
+                }} type="button">
                   <Radar size={16} /> {liveRunning ? "Auto cloud live" : "Start auto cloud"}
                 </button>
-                <button className="stop-live-command" disabled={!liveRunning} onClick={stopGeminiLive} type="button">
+                <button className="stop-live-command" disabled={!liveRunning} onClick={() => {
+                  trackProductEvent("AI stream stopped", {
+                    scanned_frames: liveFrameCount,
+                    evidence_frames: lastFrames.length,
+                    cloud_calls: liveUsage.requests,
+                  });
+                  stopGeminiLive();
+                }} type="button">
                   <Pause size={16} /> Stop Live
                 </button>
               </div>
@@ -2313,24 +2402,45 @@ export function IndustrialVideoAnalyzer({
 
             <div className="quick-preset-row" aria-label="Example analytics">
               <button className={objective === DEFAULT_OBJECTIVE ? "active" : ""} onClick={() => {
+                trackProductEvent("Analytics preset selected", {
+                  preset: "General query",
+                });
                 setObjective(DEFAULT_OBJECTIVE);
                 setMode("industrial_general");
               }} type="button">
                 General query
               </button>
               {quickPresets.map((preset) => (
-                <button className={objective === preset.objective ? "active" : ""} key={`quick-${preset.label}`} onClick={() => applyPreset(preset)} type="button">
+                <button className={objective === preset.objective ? "active" : ""} key={`quick-${preset.label}`} onClick={() => {
+                  trackProductEvent("Analytics preset selected", {
+                    preset: preset.label,
+                    mode: preset.mode,
+                  });
+                  applyPreset(preset);
+                }} type="button">
                   {preset.label}
                 </button>
               ))}
             </div>
 
             <div className="first-fold-actions">
-              <button className={source === "camera" && running ? "active" : ""} disabled={liveRunning} onClick={() => void startGeminiLive()} type="button">
+              <button className={source === "camera" && running ? "active" : ""} disabled={liveRunning} onClick={() => {
+                trackProductEvent("AI stream start clicked", {
+                  source,
+                  camera_facing: cameraFacing,
+                  location: "toolbar_button",
+                });
+                void startGeminiLive();
+              }} type="button">
                 <Camera size={16} />
                 <span>{liveRunning ? "AI stream on" : `Start ${cameraFacing === "environment" ? "back" : "front"} AI stream`}</span>
               </button>
-              <button className={source === "camera" ? "active" : ""} onClick={() => void switchCamera()} type="button">
+              <button className={source === "camera" ? "active" : ""} onClick={() => {
+                trackProductEvent("Camera flipped", {
+                  from: cameraFacing,
+                });
+                void switchCamera();
+              }} type="button">
                 <RotateCcw size={16} />
                 <span>Flip</span>
               </button>
@@ -2342,13 +2452,25 @@ export function IndustrialVideoAnalyzer({
                   onChange={(event) => {
                     const file = event.target.files?.[0];
                     if (file) {
+                      trackProductEvent("Video uploaded", {
+                        size_mb: Number((file.size / 1024 / 1024).toFixed(2)),
+                        type: file.type || "unknown",
+                      });
                       void loadFile(file);
                     }
                   }}
                   type="file"
                 />
               </label>
-              <button disabled={!running && !holdRecording} onClick={stopCamera} type="button">
+              <button disabled={!running && !holdRecording} onClick={() => {
+                trackProductEvent("Camera stopped", {
+                  source,
+                  live_running: liveRunning,
+                  scanned_frames: liveFrameCount,
+                  evidence_frames: lastFrames.length,
+                });
+                stopCamera();
+              }} type="button">
                 <Pause size={16} />
                 <span>{holdRecording ? "Cancel" : "Stop"}</span>
               </button>
@@ -2356,7 +2478,13 @@ export function IndustrialVideoAnalyzer({
 
             <div className="sample-strip primary-samples" aria-label="Quick demo clips">
               {SAMPLE_CLIPS.filter((clip) => clip.url).map((clip) => (
-                <button className={sampleUrl === clip.url && source === "sample" ? "active" : ""} key={`primary-${clip.url}`} onClick={() => void loadSampleClip(clip)} type="button">
+                <button className={sampleUrl === clip.url && source === "sample" ? "active" : ""} key={`primary-${clip.url}`} onClick={() => {
+                  trackProductEvent("Sample clip selected", {
+                    sample: clip.label,
+                    mode: clip.mode,
+                  });
+                  void loadSampleClip(clip);
+                }} type="button">
                   Use {clip.label}
                 </button>
               ))}
@@ -2372,7 +2500,12 @@ export function IndustrialVideoAnalyzer({
             </div>
 
             <label className="force-cloud-toggle">
-              <input checked={forceCloudAnalysis} onChange={(event) => setForceCloudAnalysis(event.target.checked)} type="checkbox" />
+              <input checked={forceCloudAnalysis} onChange={(event) => {
+                trackProductEvent("Manual override toggled", {
+                  enabled: event.target.checked,
+                });
+                setForceCloudAnalysis(event.target.checked);
+              }} type="checkbox" />
               <span>
                 <strong>Manual cloud override</strong>
                 <small>{forceCloudAnalysis ? "Override on: send best sampled frames even without an edge trigger." : "Strict mode: cloud waits for object, motion, or scene change."}</small>
@@ -2407,7 +2540,13 @@ export function IndustrialVideoAnalyzer({
                     <button
                       className={provider === candidate ? "active" : ""}
                       key={candidate}
-                      onClick={() => setProvider(candidate)}
+                      onClick={() => {
+                        trackProductEvent("Provider selected", {
+                          provider: candidate,
+                          ready: providerStatus[candidate],
+                        });
+                        setProvider(candidate);
+                      }}
                       type="button"
                     >
                       {PROVIDER_COPY[candidate].label}
@@ -2420,7 +2559,12 @@ export function IndustrialVideoAnalyzer({
               {devices.length > 0 ? (
                 <label className="device-select">
                   Camera device
-                  <select disabled={running} onChange={(event) => setSelectedDeviceId(event.target.value || null)} value={selectedDeviceId ?? ""}>
+                  <select disabled={running} onChange={(event) => {
+                    trackProductEvent("Camera device selected", {
+                      has_device: Boolean(event.target.value),
+                    });
+                    setSelectedDeviceId(event.target.value || null);
+                  }} value={selectedDeviceId ?? ""}>
                     {devices.map((device, index) => (
                       <option key={device.deviceId} value={device.deviceId}>
                         {device.label || `Camera ${index + 1}`}
@@ -2436,7 +2580,12 @@ export function IndustrialVideoAnalyzer({
                   <span>
                     Zone tool: {zoneToolOpen ? `on (${Math.round((zones[0]?.w ?? 0) * 100)}% x ${Math.round((zones[0]?.h ?? 0) * 100)}%)` : "off"}
                   </span>
-                  <button onClick={() => setZoneToolOpen((value) => !value)} type="button">
+                  <button onClick={() => {
+                    trackProductEvent("Zone tool toggled", {
+                      enabled: !zoneToolOpen,
+                    });
+                    setZoneToolOpen((value) => !value);
+                  }} type="button">
                     {zoneToolOpen ? "Hide zone" : "Draw zone"}
                   </button>
                 </div>
@@ -2450,16 +2599,32 @@ export function IndustrialVideoAnalyzer({
                     ))}
                   </select>
                   <input onChange={(event) => setSampleUrl(event.target.value)} placeholder="https://example.com/video.mp4" value={sampleUrl} />
-                  <button onClick={loadSampleUrl} type="button">
+                  <button onClick={() => {
+                    trackProductEvent("Sample URL loaded", {
+                      has_url: Boolean(sampleUrl.trim()),
+                    });
+                    void loadSampleUrl();
+                  }} type="button">
                     <Play size={16} /> Load URL
                   </button>
                 </div>
 
                 <div className="utility-row">
-                  <button className="usage-reset" onClick={resetLimit} type="button">
+                  <button className="usage-reset" onClick={() => {
+                    trackProductEvent("Usage limit reset", {
+                      analyses_used: analysesUsed,
+                    });
+                    resetLimit();
+                  }} type="button">
                     Reset limit
                   </button>
-                  <button onClick={reset} type="button">
+                  <button onClick={() => {
+                    trackProductEvent("Result cleared", {
+                      had_analysis: Boolean(analysis),
+                      evidence_frames: lastFrames.length,
+                    });
+                    reset();
+                  }} type="button">
                     <RotateCcw size={16} /> Clear result
                   </button>
                 </div>

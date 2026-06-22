@@ -161,6 +161,7 @@ Camera access requires a secure context in production, so phone demos should use
 - The browser maintains a qualified evidence buffer; steady scenes do not keep adding cloud-bound frames.
 - The server caps cloud analysis to selected sampled frames for latency and cost control.
 - Manual cloud override is explicit and visible in the UI.
+- Vercel Web Analytics tracks pageviews and privacy-light product events such as stream starts, uploads, sample selection, provider selection, manual cloud requests, edge-gate blocks, and cloud analysis outcomes.
 - Internet-hosted videos may block canvas extraction unless CORS headers are present; uploaded files and bundled samples are reliable.
 - Cost is a model-aware estimate based on returned token usage and the local pricing table. Provider dashboards remain the billing source of truth.
 - There are no mock model fallbacks. Missing keys and provider failures return explicit errors.

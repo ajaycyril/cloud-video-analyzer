@@ -24,6 +24,19 @@ The live camera loop separates three concepts:
 
 Bounding boxes are stabilized across repeated detections of the same object, so live overlays do not pulse just because confidence or coordinates jitter slightly. After a cloud call, the app keeps the last analyzed scene signature and suppresses repeat calls until the camera view changes meaningfully.
 
+## Launch Metrics
+
+The app uses Vercel Web Analytics for pageviews and custom product events. Tracked events are intentionally privacy-light:
+
+- Demo opened
+- AI stream start/stop/start failure
+- Manual cloud request
+- Sample clip, uploaded video, provider, preset, zone tool, and camera flip actions
+- Edge gate blocked cloud
+- Cloud analysis completed/failed/failover
+
+The app does not track prompts, uploaded filenames, images, video frames, or raw user media.
+
 ## No Silent Fallbacks
 
 The app does not fabricate analytics if a model fails. Missing API keys, invalid model output, tainted canvas, and bad requests are visible errors.
